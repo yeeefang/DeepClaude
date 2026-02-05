@@ -105,6 +105,10 @@ class GeminiClient(BaseClient):
         """
         temperature, top_p, _, _ = model_arg
 
+        # 忽略 tools 參數 - Gemini 工具格式與 OpenAI 不兼容
+        if tools:
+            logger.warning(f"Gemini 不支援 OpenAI 格式的 tools，已忽略 {len(tools)} 個工具定義")
+
         # 轉換訊息格式
         gemini_contents = self._convert_openai_to_gemini(messages)
 
