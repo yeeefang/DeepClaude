@@ -8,6 +8,7 @@ from fastapi.responses import StreamingResponse
 
 from app.deepclaude.deepclaude import DeepClaude
 from app.openai_composite import OpenAICompatibleComposite
+from app.gemini_composite import GeminiComposite
 from app.utils.logger import logger
 from app.utils.xml_tool_filter import clean_messages
 
@@ -143,9 +144,11 @@ class ModelManager:
         if is_same_model:
             logger.info(f"模型 {model_name} 使用单一模型模式: {reasoner_name}")
 
-        # 创建模型实例
-        if target_config.get("model_format", "") == "anthropic":
-            # 创建 DeepClaude 实例
+        # 创建模型实例 - 根据 model_format 選擇
+        model_format = target_config.get("model_format", "openai")
+
+        if model_format == "anthropic":
+            # 创建 DeepClaude 实例 (Anthropic Claude)
             instance = DeepClaude(
                 deepseek_api_key=reasoner_config["api_key"],
                 claude_api_key=target_config["api_key"],
@@ -158,8 +161,21 @@ class ModelManager:
                 system_config=system_config,
                 is_same_model=is_same_model,
             )
+        elif model_format == "gemini":
+            # 创建 GeminiComposite 实例 (Google Gemini 原生格式)
+            instance = GeminiComposite(
+                deepseek_api_key=reasoner_config["api_key"],
+                gemini_api_key=target_config["api_key"],
+                deepseek_api_url=f"{reasoner_config['api_base_url']}/{reasoner_config['api_request_address']}",
+                gemini_api_url=target_config['api_base_url'],  # Gemini 不需要 request_address，在 client 內處理
+                is_origin_reasoning=reasoner_config.get("is_origin_reasoning", self.is_origin_reasoning),
+                reasoner_proxy=reasoner_proxy,
+                target_proxy=target_proxy,
+                system_config=system_config,
+                is_same_model=is_same_model,
+            )
         else:
-            # 创建 OpenAICompatibleComposite 实例
+            # 创建 OpenAICompatibleComposite 实例 (OpenAI 相容格式)
             instance = OpenAICompatibleComposite(
                 deepseek_api_key=reasoner_config["api_key"],
                 openai_api_key=target_config["api_key"],

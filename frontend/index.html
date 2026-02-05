@@ -292,9 +292,15 @@
                         <div class="mb-3">
                             <label class="form-label">模型格式</label>
                             <select class="form-select model-format">
-                                <option value="openai">OpenAI</option>
-                                <option value="anthropic">Anthropic</option>
+                                <option value="openai">OpenAI 相容</option>
+                                <option value="anthropic">Anthropic (Claude)</option>
+                                <option value="gemini">Google Gemini 原生</option>
                             </select>
+                            <div class="form-text mt-2">
+                                <strong>OpenAI 相容:</strong> DeepSeek, Gemini OpenAI endpoint, 等<br>
+                                <strong>Anthropic:</strong> Claude 3/4 官方 API<br>
+                                <strong>Google Gemini 原生:</strong> Gemini 原生格式 (推薦 Gemini 使用)
+                            </div>
                         </div>
                         <div class="mb-3 form-check form-switch">
                             <input class="form-check-input is-valid" type="checkbox">

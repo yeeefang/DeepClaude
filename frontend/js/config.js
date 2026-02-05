@@ -311,7 +311,7 @@ function handleAddModel() {
         case 'reasoner':
             defaultConfig = { model_id: '', api_key: '', api_base_url: '', api_request_address: '', is_origin_reasoning: true, is_valid: true }; break;
         case 'target':
-            defaultConfig = { model_id: '', api_key: '', api_base_url: '', api_request_address: '', model_format: 'openai', is_valid: true }; break;
+            defaultConfig = { model_id: '', api_key: '', api_base_url: '', api_request_address: '', model_format: 'gemini', is_valid: true }; break;
         case 'composite':
             const firstReasonerModel = Object.keys(configData.reasoner_models || {})[0] || '';
             const firstTargetModel = Object.keys(configData.target_models || {})[0] || '';

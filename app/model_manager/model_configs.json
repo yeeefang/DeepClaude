@@ -12,8 +12,8 @@
         "Gemini/Gemini-3-Flash": {
             "model_id": "gemini-2.5-flash-preview-04-17",
             "api_key": "***********",
-            "api_base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
-            "api_request_address": "chat/completions",
+            "api_base_url": "https://generativelanguage.googleapis.com",
+            "api_request_address": "",
             "is_origin_reasoning": false,
             "is_valid": true,
             "proxy_open": false
@@ -41,18 +41,18 @@
         "Gemini/Gemini-3-Flash": {
             "model_id": "gemini-2.5-flash-preview-04-17",
             "api_key": "***********",
-            "api_base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
-            "api_request_address": "chat/completions",
-            "model_format": "openai",
+            "api_base_url": "https://generativelanguage.googleapis.com",
+            "api_request_address": "",
+            "model_format": "gemini",
             "is_valid": true,
             "proxy_open": false
         },
         "Gemini/Gemini-3-Pro": {
             "model_id": "gemini-2.5-pro-preview-05-06",
             "api_key": "***********",
-            "api_base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
-            "api_request_address": "chat/completions",
-            "model_format": "openai",
+            "api_base_url": "https://generativelanguage.googleapis.com",
+            "api_request_address": "",
+            "model_format": "gemini",
             "is_valid": true,
             "proxy_open": false
         }
