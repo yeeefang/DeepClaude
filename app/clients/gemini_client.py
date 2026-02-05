@@ -116,71 +116,82 @@ class GeminiClient(BaseClient):
 
         logger.info(f"Gemini API 串流請求: {endpoint}")
 
+        # 處理代理地址格式
+        proxy_url = None
+        if self.proxy:
+            if not self.proxy.startswith(('http://', 'https://', 'socks://', 'socks5://')):
+                proxy_url = f"http://{self.proxy}"
+            else:
+                proxy_url = self.proxy
+            logger.info(f"使用代理: {proxy_url}")
+
         try:
-            async with self.session.post(
-                endpoint,
-                headers=self._get_headers(),
-                json=request_body,
-                proxy=self.proxy,
-            ) as response:
-                if response.status != 200:
-                    error_text = await response.text()
-                    logger.error(f"Gemini API 錯誤 {response.status}: {error_text}")
-                    raise ClientError(f"Gemini API 錯誤: 狀態碼 {response.status}, {error_text}")
+            connector = aiohttp.TCPConnector(limit=100, force_close=True)
+            async with aiohttp.ClientSession(connector=connector, timeout=self.timeout) as session:
+                async with session.post(
+                    endpoint,
+                    headers=self._get_headers(),
+                    json=request_body,
+                    proxy=proxy_url,
+                ) as response:
+                    if response.status != 200:
+                        error_text = await response.text()
+                        logger.error(f"Gemini API 錯誤 {response.status}: {error_text}")
+                        raise ClientError(f"Gemini API 錯誤: 狀態碼 {response.status}, {error_text}")
 
-                # 處理 Gemini 串流回應 (Server-Sent Events)
-                buffer = b""
-                async for chunk in response.content.iter_chunked(1024):
-                    buffer += chunk
+                    # 處理 Gemini 串流回應 (Server-Sent Events)
+                    buffer = b""
+                    async for chunk in response.content.iter_chunked(1024):
+                        buffer += chunk
 
-                    # 處理完整的 JSON 行
-                    while b'\n' in buffer:
-                        line, buffer = buffer.split(b'\n', 1)
-                        line = line.strip()
+                        # 處理完整的 JSON 行
+                        while b'\n' in buffer:
+                            line, buffer = buffer.split(b'\n', 1)
+                            line = line.strip()
 
-                        if not line:
-                            continue
+                            if not line:
+                                continue
 
+                            try:
+                                # Gemini 返回 JSON 格式
+                                data = json.loads(line)
+
+                                # 提取文本內容
+                                if "candidates" in data:
+                                    for candidate in data["candidates"]:
+                                        if "content" in candidate:
+                                            for part in candidate["content"].get("parts", []):
+                                                if "text" in part:
+                                                    yield ("assistant", part["text"])
+
+                                # 檢查完成
+                                if "candidates" in data:
+                                    for candidate in data["candidates"]:
+                                        finish_reason = candidate.get("finishReason")
+                                        if finish_reason:
+                                            # 轉換 finish_reason
+                                            openai_reason = "stop" if finish_reason == "STOP" else "length"
+                                            yield ("finish", openai_reason)
+                                            return
+
+                            except json.JSONDecodeError:
+                                logger.warning(f"無法解析 Gemini 回應: {line[:100]}")
+                                continue
+
+                    # 處理剩餘 buffer
+                    if buffer:
                         try:
-                            # Gemini 返回 JSON 格式
-                            data = json.loads(line)
-
-                            # 提取文本內容
+                            data = json.loads(buffer)
                             if "candidates" in data:
                                 for candidate in data["candidates"]:
                                     if "content" in candidate:
                                         for part in candidate["content"].get("parts", []):
                                             if "text" in part:
                                                 yield ("assistant", part["text"])
-
-                            # 檢查完成
-                            if "candidates" in data:
-                                for candidate in data["candidates"]:
-                                    finish_reason = candidate.get("finishReason")
-                                    if finish_reason:
-                                        # 轉換 finish_reason
-                                        openai_reason = "stop" if finish_reason == "STOP" else "length"
-                                        yield ("finish", openai_reason)
-                                        return
-
                         except json.JSONDecodeError:
-                            logger.warning(f"無法解析 Gemini 回應: {line[:100]}")
-                            continue
+                            pass
 
-                # 處理剩餘 buffer
-                if buffer:
-                    try:
-                        data = json.loads(buffer)
-                        if "candidates" in data:
-                            for candidate in data["candidates"]:
-                                if "content" in candidate:
-                                    for part in candidate["content"].get("parts", []):
-                                        if "text" in part:
-                                            yield ("assistant", part["text"])
-                    except json.JSONDecodeError:
-                        pass
-
-                yield ("finish", "stop")
+                    yield ("finish", "stop")
 
         except ClientError as e:
             logger.error(f"Gemini 串流請求失敗: {e}")
