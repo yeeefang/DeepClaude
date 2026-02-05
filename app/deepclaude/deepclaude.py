@@ -38,9 +38,10 @@ def _build_bridge_content(original_content: str, reasoning: str, system_config: 
     return (
         f"{original_content}\n\n"
         f"<reasoning_context>\n{condensed}\n</reasoning_context>\n\n"
-        "Based on the above reasoning context, provide a complete and helpful answer. "
-        "You may use available tools if needed to gather information or perform actions. "
-        "Override the reasoning with your own knowledge when it conflicts or seems incorrect."
+        "Based on the above reasoning context, respond appropriately. "
+        "If the reasoning suggests analyzing or routing the task, follow that guidance. "
+        "If the reasoning suggests taking action, you may use available tools if needed. "
+        "Use your own judgment and override the reasoning if it conflicts with your knowledge."
     )
 
 
