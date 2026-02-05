@@ -242,6 +242,14 @@
                             <label class="form-label">API 請求位址</label>
                             <input type="text" class="form-control api-request-address" placeholder="例如: v1/chat/completions">
                         </div>
+                        <div class="mb-3">
+                            <label class="form-label">模型格式</label>
+                            <select class="form-select model-format">
+                                <option value="openai">OpenAI 相容 (DeepSeek)</option>
+                                <option value="gemini">Google Gemini 原生</option>
+                            </select>
+                            <div class="form-text mt-2">選擇格式將自動填入預設 Base URL 與 API 請求位址</div>
+                        </div>
                         <div class="mb-3 form-check form-switch">
                             <input class="form-check-input is-origin-reasoning" type="checkbox">
                             <label class="form-check-label">是否原生支援推理</label>

@@ -106,9 +106,16 @@ function renderReasonerModel(name, config) {
     form.querySelector('.api-key').value = config.api_key || '';
     form.querySelector('.api-base-url').value = config.api_base_url || '';
     form.querySelector('.api-request-address').value = config.api_request_address || '';
+    form.querySelector('.model-format').value = config.model_format || 'openai';
     form.querySelector('.is-origin-reasoning').checked = config.is_origin_reasoning || false;
     form.querySelector('.is-valid').checked = config.is_valid || false;
     form.querySelector('.is-proxy-open').checked = config.proxy_open || false;
+
+    // 監聽格式變更以自動填入預設值
+    form.querySelector('.model-format').addEventListener('change', (e) => {
+        applyFormatPresets(form, e.target.value, 'reasoner');
+    });
+
     form.querySelector('.save-model-btn').addEventListener('click', () => { saveReasonerModel(name, form); });
     clone.querySelector('.edit-model-btn').addEventListener('click', () => { toggleFormEditable(form, true); });
     clone.querySelector('.delete-model-btn').addEventListener('click', () => { showDeleteConfirmation('reasoner', name); });
@@ -125,9 +132,15 @@ function renderTargetModel(name, config) {
     form.querySelector('.api-key').value = config.api_key || '';
     form.querySelector('.api-base-url').value = config.api_base_url || '';
     form.querySelector('.api-request-address').value = config.api_request_address || '';
-    form.querySelector('.model-format').value = config.model_format || 'openai';
+    form.querySelector('.model-format').value = config.model_format || 'gemini';
     form.querySelector('.is-valid').checked = config.is_valid || false;
     form.querySelector('.is-proxy-open').checked = config.proxy_open || false;
+
+    // 監聽格式變更以自動填入預設值
+    form.querySelector('.model-format').addEventListener('change', (e) => {
+        applyFormatPresets(form, e.target.value, 'target');
+    });
+
     form.querySelector('.save-model-btn').addEventListener('click', () => { saveTargetModel(name, form); });
     clone.querySelector('.edit-model-btn').addEventListener('click', () => { toggleFormEditable(form, true); });
     clone.querySelector('.delete-model-btn').addEventListener('click', () => { showDeleteConfirmation('target', name); });
@@ -195,10 +208,61 @@ function toggleFormEditable(form, editable) {
     form.querySelector('.save-model-btn').style.display = editable ? 'block' : 'none';
 }
 
+function applyFormatPresets(form, format, modelType) {
+    // 格式預設值配置
+    const presets = {
+        openai: {
+            reasoner: {
+                base_url: 'https://api.deepseek.com',
+                request_address: 'v1/chat/completions',
+                is_origin_reasoning: true
+            },
+            target: {
+                base_url: 'https://api.openai.com',
+                request_address: 'v1/chat/completions'
+            }
+        },
+        gemini: {
+            reasoner: {
+                base_url: 'https://generativelanguage.googleapis.com',
+                request_address: '',
+                is_origin_reasoning: false
+            },
+            target: {
+                base_url: 'https://generativelanguage.googleapis.com',
+                request_address: ''
+            }
+        },
+        anthropic: {
+            target: {
+                base_url: 'https://api.anthropic.com',
+                request_address: 'v1/messages'
+            }
+        }
+    };
+
+    const preset = presets[format]?.[modelType];
+    if (!preset) return;
+
+    // 自動填入預設值
+    if (preset.base_url) {
+        form.querySelector('.api-base-url').value = preset.base_url;
+    }
+    if (preset.request_address !== undefined) {
+        form.querySelector('.api-request-address').value = preset.request_address;
+    }
+    if (preset.is_origin_reasoning !== undefined && modelType === 'reasoner') {
+        form.querySelector('.is-origin-reasoning').checked = preset.is_origin_reasoning;
+    }
+
+    showToast(`已載入 ${format} 格式預設值`, 'info');
+}
+
 function saveReasonerModel(name, form) {
     configData.reasoner_models[name] = {
         model_id: form.querySelector('.model-id').value, api_key: form.querySelector('.api-key').value,
         api_base_url: form.querySelector('.api-base-url').value, api_request_address: form.querySelector('.api-request-address').value,
+        model_format: form.querySelector('.model-format').value,
         is_origin_reasoning: form.querySelector('.is-origin-reasoning').checked, is_valid: form.querySelector('.is-valid').checked,
         proxy_open: form.querySelector('.is-proxy-open').checked
     };
@@ -309,7 +373,7 @@ function handleAddModel() {
     let defaultConfig;
     switch (modelType) {
         case 'reasoner':
-            defaultConfig = { model_id: '', api_key: '', api_base_url: '', api_request_address: '', is_origin_reasoning: true, is_valid: true }; break;
+            defaultConfig = { model_id: '', api_key: '', api_base_url: '', api_request_address: '', model_format: 'openai', is_origin_reasoning: true, is_valid: true }; break;
         case 'target':
             defaultConfig = { model_id: '', api_key: '', api_base_url: '', api_request_address: '', model_format: 'gemini', is_valid: true }; break;
         case 'composite':

@@ -5,6 +5,7 @@
             "api_key": "*************",
             "api_base_url": "https://api.deepseek.com",
             "api_request_address": "v1/chat/completions",
+            "model_format": "openai",
             "is_origin_reasoning": true,
             "is_valid": false,
             "proxy_open": false
@@ -14,6 +15,7 @@
             "api_key": "***********",
             "api_base_url": "https://generativelanguage.googleapis.com",
             "api_request_address": "",
+            "model_format": "gemini",
             "is_origin_reasoning": false,
             "is_valid": true,
             "proxy_open": false
