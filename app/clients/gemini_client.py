@@ -1,10 +1,11 @@
-"""Gemini 客戶端 - 使用 Google 官方 SDK"""
+"""Gemini 客戶端 - 使用 Google 官方 SDK (google.genai)"""
 
 import asyncio
+import json
 from typing import AsyncGenerator, Optional, Dict, Any, List
 
-import google.generativeai as genai
-from google.generativeai.types import FunctionDeclaration, Tool, ContentDict
+from google import genai
+from google.genai import types
 
 from app.clients.base_client import BaseClient
 from app.utils.logger import logger
@@ -14,6 +15,7 @@ class GeminiClient(BaseClient):
     """Gemini 客戶端 - 使用 Google 官方 SDK
 
     參考: https://ai.google.dev/api?hl=zh-tw
+    使用新版 google.genai SDK (取代已廢棄的 google.generativeai)
     """
 
     def __init__(
@@ -33,8 +35,8 @@ class GeminiClient(BaseClient):
         """
         super().__init__(api_key, api_url, timeout, proxy=proxy)
 
-        # 配置 SDK
-        genai.configure(api_key=api_key)
+        # 創建客戶端實例
+        self.client = genai.Client(api_key=api_key)
 
         if proxy:
             logger.warning(
@@ -45,7 +47,7 @@ class GeminiClient(BaseClient):
     def _convert_openai_to_gemini(
         self,
         messages: List[Dict[str, str]]
-    ) -> tuple[Optional[str], List[ContentDict]]:
+    ) -> tuple[Optional[str], List[types.Content]]:
         """轉換 OpenAI 格式訊息到 Gemini SDK 格式
 
         Args:
@@ -57,7 +59,7 @@ class GeminiClient(BaseClient):
                 - contents: Gemini 格式的對話內容
         """
         system_instruction = None
-        contents: List[ContentDict] = []
+        contents: List[types.Content] = []
 
         for msg in messages:
             role = msg.get("role", "user")
@@ -67,29 +69,36 @@ class GeminiClient(BaseClient):
                 # 系統訊息作為 system_instruction
                 system_instruction = content
             elif role == "user":
-                contents.append({"role": "user", "parts": [content]})
+                contents.append(
+                    types.Content(
+                        role="user",
+                        parts=[types.Part(text=content)]
+                    )
+                )
             elif role == "assistant":
-                contents.append({"role": "model", "parts": [content]})
+                contents.append(
+                    types.Content(
+                        role="model",
+                        parts=[types.Part(text=content)]
+                    )
+                )
 
         return system_instruction, contents
 
     def _convert_openai_tools_to_gemini(
         self,
         openai_tools: List[Dict[str, Any]]
-    ) -> List[Tool]:
+    ) -> Optional[List[types.Tool]]:
         """轉換 OpenAI 工具格式到 Gemini SDK 格式
 
         Args:
             openai_tools: OpenAI 格式的工具列表
-                例如: [{"type": "function", "function": {"name": "...", "parameters": {...}}}]
 
         Returns:
             Gemini Tool 列表
-
-        參考: https://ai.google.dev/api/python/google/generativeai/types/Tool
         """
         if not openai_tools:
-            return []
+            return None
 
         function_declarations = []
 
@@ -109,11 +118,10 @@ class GeminiClient(BaseClient):
 
             try:
                 # 創建 Gemini FunctionDeclaration
-                # Gemini 使用 JSON Schema 格式的參數定義
-                func_decl = FunctionDeclaration(
+                func_decl = types.FunctionDeclaration(
                     name=name,
                     description=description,
-                    parameters=parameters  # 直接使用 OpenAI 的 JSON Schema
+                    parameters=parameters
                 )
                 function_declarations.append(func_decl)
                 logger.debug(f"轉換工具: {name}")
@@ -123,10 +131,10 @@ class GeminiClient(BaseClient):
                 continue
 
         if not function_declarations:
-            return []
+            return None
 
-        # 將所有函數聲明包裝成一個 Tool
-        return [Tool(function_declarations=function_declarations)]
+        # 返回 Tool 列表
+        return [types.Tool(function_declarations=function_declarations)]
 
     async def stream_chat(
         self,
@@ -162,8 +170,6 @@ class GeminiClient(BaseClient):
                 gemini_tools = self._convert_openai_tools_to_gemini(tools)
                 if gemini_tools:
                     logger.info(f"已轉換 {len(tools)} 個工具到 Gemini 格式")
-                else:
-                    logger.warning("工具轉換結果為空")
             except Exception as e:
                 logger.error(f"工具轉換失敗: {e}，將不使用工具")
                 gemini_tools = None
@@ -173,74 +179,61 @@ class GeminiClient(BaseClient):
 
         try:
             # 創建生成配置
-            generation_config = genai.GenerationConfig(
+            config = types.GenerateContentConfig(
                 temperature=temperature,
                 top_p=top_p,
-            )
-
-            # 創建模型實例
-            model_instance = genai.GenerativeModel(
-                model_name=model,
-                generation_config=generation_config,
                 system_instruction=system_instruction,
-                tools=gemini_tools,  # 傳遞工具定義
+                tools=gemini_tools,
             )
 
             logger.info(f"使用 Gemini SDK 串流請求: {model}")
 
-            # 在異步環境中運行同步的 generate_content
+            # 使用新 SDK 的異步方法
             loop = asyncio.get_event_loop()
 
             # 生成內容 (streaming)
-            response = await loop.run_in_executor(
+            response_stream = await loop.run_in_executor(
                 None,
-                lambda: model_instance.generate_content(
-                    contents,
-                    stream=True,
+                lambda: self.client.models.generate_content_stream(
+                    model=model,
+                    contents=contents,
+                    config=config,
                 )
             )
 
             # 處理串流回應
             has_content = False
-            for chunk in response:
+            for chunk in response_stream:
                 # 處理文本內容
                 if chunk.text:
                     has_content = True
                     yield ("assistant", chunk.text)
 
                 # 處理函數調用
-                # Gemini SDK 會在 chunk.parts 中包含 function_call
-                if hasattr(chunk, 'parts'):
-                    for part in chunk.parts:
-                        if hasattr(part, 'function_call'):
-                            func_call = part.function_call
-                            # 轉換為 OpenAI 格式的工具調用
-                            tool_call_json = {
-                                "id": f"call_{func_call.name}",
-                                "type": "function",
-                                "function": {
-                                    "name": func_call.name,
-                                    "arguments": str(func_call.args)
-                                }
-                            }
-                            logger.info(f"Gemini 調用工具: {func_call.name}")
-                            yield ("tool_call", str(tool_call_json))
+                if hasattr(chunk, 'candidates') and chunk.candidates:
+                    for candidate in chunk.candidates:
+                        if hasattr(candidate, 'content') and candidate.content:
+                            for part in candidate.content.parts:
+                                if hasattr(part, 'function_call') and part.function_call:
+                                    func_call = part.function_call
+                                    # 轉換為 OpenAI 格式的工具調用
+                                    tool_call_json = {
+                                        "id": f"call_{func_call.name}",
+                                        "type": "function",
+                                        "function": {
+                                            "name": func_call.name,
+                                            "arguments": json.dumps(dict(func_call.args))
+                                        }
+                                    }
+                                    logger.info(f"Gemini 調用工具: {func_call.name}")
+                                    yield ("tool_call", json.dumps(tool_call_json))
 
             # 檢查完成原因
             finish_reason = "stop"
 
-            # 檢查安全性過濾
-            try:
-                if hasattr(response, 'prompt_feedback'):
-                    feedback = response.prompt_feedback
-                    if feedback and hasattr(feedback, 'block_reason'):
-                        if feedback.block_reason:
-                            logger.warning(f"Gemini 回應被阻止: {feedback.block_reason}")
-                            finish_reason = "content_filter"
-                            if not has_content:
-                                yield ("assistant", "⚠️ 回應因安全過濾而被阻止")
-            except Exception as e:
-                logger.debug(f"無法檢查完成原因: {e}")
+            if not has_content:
+                logger.warning("Gemini 未返回任何內容")
+                yield ("assistant", "⚠️ 模型未返回任何內容，請重試")
 
             yield ("finish", finish_reason)
 
@@ -248,6 +241,6 @@ class GeminiClient(BaseClient):
             error_msg = str(e)
             logger.error(f"Gemini SDK 請求失敗: {error_msg}")
 
-            # 返回錯誤訊息而不是拋出異常
+            # 返回錯誤訊息
             yield ("assistant", f"⚠️ Gemini API 錯誤: {error_msg[:200]}")
             yield ("finish", "stop")
