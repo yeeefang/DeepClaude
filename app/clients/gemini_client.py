@@ -1,87 +1,132 @@
-"""Gemini 原生 API 客戶端 - 支援 Google Gemini 原生格式"""
+"""Gemini 客戶端 - 使用 Google 官方 SDK"""
 
-import json
+import asyncio
 from typing import AsyncGenerator, Optional, Dict, Any, List
 
-import aiohttp
-from aiohttp.client_exceptions import ClientError
+import google.generativeai as genai
+from google.generativeai.types import FunctionDeclaration, Tool, ContentDict
 
 from app.clients.base_client import BaseClient
 from app.utils.logger import logger
 
 
 class GeminiClient(BaseClient):
-    """Gemini 原生 API 客戶端
+    """Gemini 客戶端 - 使用 Google 官方 SDK
 
-    支援 Google Gemini API 原生格式：
-    - Endpoint: /v1beta/models/{model}:generateContent
-    - Auth: x-goog-api-key header
-    - Format: contents array with parts
+    參考: https://ai.google.dev/api?hl=zh-tw
     """
 
     def __init__(
         self,
         api_key: str,
-        api_url: str,
-        timeout: Optional[aiohttp.ClientTimeout] = None,
+        api_url: str = "https://generativelanguage.googleapis.com",
+        timeout: Optional[Any] = None,
         proxy: str = None,
     ):
         """初始化 Gemini 客戶端
 
         Args:
             api_key: Google API Key
-            api_url: API 基礎 URL (e.g., https://generativelanguage.googleapis.com)
-            timeout: 請求超時設置
-            proxy: 代理服務器地址
+            api_url: API 基礎 URL (未使用，SDK 自動處理)
+            timeout: 請求超時設置 (未使用，SDK 自動處理)
+            proxy: 代理服務器地址 (未使用，需要通過環境變量設置)
         """
         super().__init__(api_key, api_url, timeout, proxy=proxy)
 
-    def _get_headers(self) -> Dict[str, str]:
-        """獲取請求頭 - Gemini 使用 x-goog-api-key"""
-        return {
-            "Content-Type": "application/json",
-            "x-goog-api-key": self.api_key,
-        }
+        # 配置 SDK
+        genai.configure(api_key=api_key)
 
-    def _convert_openai_to_gemini(self, messages: List[Dict[str, str]]) -> List[Dict[str, Any]]:
-        """轉換 OpenAI 格式訊息到 Gemini 格式
+        if proxy:
+            logger.warning(
+                f"Google SDK 不直接支援 proxy 參數。"
+                f"請通過環境變量設置: HTTP_PROXY={proxy} HTTPS_PROXY={proxy}"
+            )
 
-        OpenAI: [{"role": "user", "content": "text"}]
-        Gemini: {"contents": [{"parts": [{"text": "text"}]}]} (無 role 字段)
+    def _convert_openai_to_gemini(
+        self,
+        messages: List[Dict[str, str]]
+    ) -> tuple[Optional[str], List[ContentDict]]:
+        """轉換 OpenAI 格式訊息到 Gemini SDK 格式
+
+        Args:
+            messages: OpenAI 格式訊息列表
+
+        Returns:
+            tuple: (system_instruction, contents)
+                - system_instruction: 系統指令 (可選)
+                - contents: Gemini 格式的對話內容
         """
-        gemini_contents = []
-        system_message = None
+        system_instruction = None
+        contents: List[ContentDict] = []
 
         for msg in messages:
             role = msg.get("role", "user")
             content = msg.get("content", "")
 
-            # 保存 system message 稍後合併
             if role == "system":
-                system_message = content
-                continue
+                # 系統訊息作為 system_instruction
+                system_instruction = content
+            elif role == "user":
+                contents.append({"role": "user", "parts": [content]})
+            elif role == "assistant":
+                contents.append({"role": "model", "parts": [content]})
 
-            # Gemini API 不接受 role 字段在 contents 中
-            # 直接構建 parts 格式
-            gemini_contents.append({
-                "parts": [{"text": content}]
-            })
+        return system_instruction, contents
 
-        # 如果有 system message，插入到開頭
-        if system_message and gemini_contents:
-            gemini_contents[0]["parts"][0]["text"] = f"{system_message}\n\n{gemini_contents[0]['parts'][0]['text']}"
+    def _convert_openai_tools_to_gemini(
+        self,
+        openai_tools: List[Dict[str, Any]]
+    ) -> List[Tool]:
+        """轉換 OpenAI 工具格式到 Gemini SDK 格式
 
-        return gemini_contents
-
-    def _convert_gemini_to_openai(self, gemini_text: str, role: str = "assistant") -> tuple[str, str]:
-        """轉換 Gemini 回應到 OpenAI 格式
+        Args:
+            openai_tools: OpenAI 格式的工具列表
+                例如: [{"type": "function", "function": {"name": "...", "parameters": {...}}}]
 
         Returns:
-            tuple: (content_type, content)
-                - content_type: "assistant" for text
-                - content: actual text content
+            Gemini Tool 列表
+
+        參考: https://ai.google.dev/api/python/google/generativeai/types/Tool
         """
-        return ("assistant", gemini_text)
+        if not openai_tools:
+            return []
+
+        function_declarations = []
+
+        for tool in openai_tools:
+            if tool.get("type") != "function":
+                logger.warning(f"跳過非函數類型工具: {tool.get('type')}")
+                continue
+
+            func_spec = tool.get("function", {})
+            name = func_spec.get("name")
+            description = func_spec.get("description", "")
+            parameters = func_spec.get("parameters", {})
+
+            if not name:
+                logger.warning("跳過沒有名稱的工具")
+                continue
+
+            try:
+                # 創建 Gemini FunctionDeclaration
+                # Gemini 使用 JSON Schema 格式的參數定義
+                func_decl = FunctionDeclaration(
+                    name=name,
+                    description=description,
+                    parameters=parameters  # 直接使用 OpenAI 的 JSON Schema
+                )
+                function_declarations.append(func_decl)
+                logger.debug(f"轉換工具: {name}")
+
+            except Exception as e:
+                logger.error(f"轉換工具 {name} 失敗: {e}")
+                continue
+
+        if not function_declarations:
+            return []
+
+        # 將所有函數聲明包裝成一個 Tool
+        return [Tool(function_declarations=function_declarations)]
 
     async def stream_chat(
         self,
@@ -96,115 +141,113 @@ class GeminiClient(BaseClient):
         Args:
             messages: OpenAI 格式訊息列表
             model_arg: (temperature, top_p, presence_penalty, frequency_penalty)
-            model: 模型 ID (e.g., "gemini-2.5-flash-preview-04-17")
-            tools: 工具定義 (Gemini 不支援)
-            tool_choice: 工具選擇 (Gemini 不支援)
+            model: 模型 ID (e.g., "gemini-3-flash-preview")
+            tools: 工具定義 (OpenAI 格式，將被轉換為 Gemini 格式)
+            tool_choice: 工具選擇 (Gemini 不支援，將被忽略)
 
         Yields:
             tuple[str, str]: (content_type, content)
+                - content_type: "assistant", "tool_call", 或 "finish"
+                - content: 文本內容、工具調用 JSON 或完成原因
         """
         temperature, top_p, _, _ = model_arg
 
-        # 忽略 tools 參數 - Gemini 工具格式與 OpenAI 不兼容
-        if tools:
-            logger.warning(f"Gemini 不支援 OpenAI 格式的 tools，已忽略 {len(tools)} 個工具定義")
-
         # 轉換訊息格式
-        gemini_contents = self._convert_openai_to_gemini(messages)
+        system_instruction, contents = self._convert_openai_to_gemini(messages)
 
-        # 構建 Gemini 請求體
-        request_body = {
-            "contents": gemini_contents,
-            "generationConfig": {
-                "temperature": temperature,
-                "topP": top_p,
-            }
-        }
+        # 轉換工具格式
+        gemini_tools = None
+        if tools:
+            try:
+                gemini_tools = self._convert_openai_tools_to_gemini(tools)
+                if gemini_tools:
+                    logger.info(f"已轉換 {len(tools)} 個工具到 Gemini 格式")
+                else:
+                    logger.warning("工具轉換結果為空")
+            except Exception as e:
+                logger.error(f"工具轉換失敗: {e}，將不使用工具")
+                gemini_tools = None
 
-        # Gemini endpoint: /v1beta/models/{model}:streamGenerateContent
-        endpoint = f"{self.api_url}/v1beta/models/{model}:streamGenerateContent"
-
-        logger.info(f"Gemini API 串流請求: {endpoint}")
-
-        # 處理代理地址格式
-        proxy_url = None
-        if self.proxy:
-            if not self.proxy.startswith(('http://', 'https://', 'socks://', 'socks5://')):
-                proxy_url = f"http://{self.proxy}"
-            else:
-                proxy_url = self.proxy
-            logger.info(f"使用代理: {proxy_url}")
+        if tool_choice:
+            logger.warning("Gemini 不支援 tool_choice 參數，將被忽略")
 
         try:
-            connector = aiohttp.TCPConnector(limit=100, force_close=True)
-            async with aiohttp.ClientSession(connector=connector, timeout=self.timeout) as session:
-                async with session.post(
-                    endpoint,
-                    headers=self._get_headers(),
-                    json=request_body,
-                    proxy=proxy_url,
-                ) as response:
-                    if response.status != 200:
-                        error_text = await response.text()
-                        logger.error(f"Gemini API 錯誤 {response.status}: {error_text}")
-                        raise ClientError(f"Gemini API 錯誤: 狀態碼 {response.status}, {error_text}")
+            # 創建生成配置
+            generation_config = genai.GenerationConfig(
+                temperature=temperature,
+                top_p=top_p,
+            )
 
-                    # 處理 Gemini 串流回應 - 累積完整響應
-                    buffer = b""
-                    async for chunk in response.content.iter_chunked(1024):
-                        buffer += chunk
+            # 創建模型實例
+            model_instance = genai.GenerativeModel(
+                model_name=model,
+                generation_config=generation_config,
+                system_instruction=system_instruction,
+                tools=gemini_tools,  # 傳遞工具定義
+            )
 
-                    # 解析完整的 JSON 響應
-                    try:
-                        response_text = buffer.decode('utf-8')
+            logger.info(f"使用 Gemini SDK 串流請求: {model}")
 
-                        # Gemini 可能返回 JSON 數組 [{}] 或單個對象 {}
-                        if response_text.startswith('['):
-                            # JSON 數組格式
-                            data_list = json.loads(response_text)
-                            if data_list:
-                                data = data_list[0]
-                            else:
-                                data = {}
-                        else:
-                            # 單個 JSON 對象
-                            data = json.loads(response_text)
+            # 在異步環境中運行同步的 generate_content
+            loop = asyncio.get_event_loop()
 
-                        # 提取文本內容
-                        if "candidates" in data:
-                            for candidate in data["candidates"]:
-                                if "content" in candidate and "parts" in candidate["content"]:
-                                    for part in candidate["content"]["parts"]:
-                                        if "text" in part:
-                                            yield ("assistant", part["text"])
+            # 生成內容 (streaming)
+            response = await loop.run_in_executor(
+                None,
+                lambda: model_instance.generate_content(
+                    contents,
+                    stream=True,
+                )
+            )
 
-                        # 檢查完成狀態
-                        finish_reason = "stop"
-                        if "candidates" in data and data["candidates"]:
-                            candidate_finish = data["candidates"][0].get("finishReason")
-                            if candidate_finish:
-                                if candidate_finish == "STOP":
-                                    finish_reason = "stop"
-                                elif candidate_finish in ["MAX_TOKENS", "SAFETY", "RECITATION", "OTHER"]:
-                                    finish_reason = "length"
-                                elif candidate_finish == "MALFORMED_FUNCTION_CALL":
-                                    logger.warning(f"Gemini 函數調用格式錯誤: {data['candidates'][0].get('finishMessage', '')}")
-                                    # 如果沒有內容則返回錯誤提示
-                                    error_msg = data['candidates'][0].get('finishMessage', 'Unknown error')
-                                    logger.warning(f"Gemini 未返回任何內容，將返回錯誤提示: {error_msg[:100]}")
-                                    yield ("assistant", f"⚠️ 模型嘗試調用工具但格式錯誤，請重試或使用不同的模型。詳情: {error_msg[:200]}")
-                                    finish_reason = "stop"
+            # 處理串流回應
+            has_content = False
+            for chunk in response:
+                # 處理文本內容
+                if chunk.text:
+                    has_content = True
+                    yield ("assistant", chunk.text)
 
-                        yield ("finish", finish_reason)
+                # 處理函數調用
+                # Gemini SDK 會在 chunk.parts 中包含 function_call
+                if hasattr(chunk, 'parts'):
+                    for part in chunk.parts:
+                        if hasattr(part, 'function_call'):
+                            func_call = part.function_call
+                            # 轉換為 OpenAI 格式的工具調用
+                            tool_call_json = {
+                                "id": f"call_{func_call.name}",
+                                "type": "function",
+                                "function": {
+                                    "name": func_call.name,
+                                    "arguments": str(func_call.args)
+                                }
+                            }
+                            logger.info(f"Gemini 調用工具: {func_call.name}")
+                            yield ("tool_call", str(tool_call_json))
 
-                    except json.JSONDecodeError as e:
-                        logger.error(f"無法解析 Gemini 完整回應: {e}")
-                        logger.debug(f"回應內容: {buffer[:500]}")
-                        yield ("finish", "stop")
+            # 檢查完成原因
+            finish_reason = "stop"
 
-        except ClientError as e:
-            logger.error(f"Gemini 串流請求失敗: {e}")
-            raise
+            # 檢查安全性過濾
+            try:
+                if hasattr(response, 'prompt_feedback'):
+                    feedback = response.prompt_feedback
+                    if feedback and hasattr(feedback, 'block_reason'):
+                        if feedback.block_reason:
+                            logger.warning(f"Gemini 回應被阻止: {feedback.block_reason}")
+                            finish_reason = "content_filter"
+                            if not has_content:
+                                yield ("assistant", "⚠️ 回應因安全過濾而被阻止")
+            except Exception as e:
+                logger.debug(f"無法檢查完成原因: {e}")
+
+            yield ("finish", finish_reason)
+
         except Exception as e:
-            logger.error(f"Gemini 串流處理異常: {e}")
-            raise
+            error_msg = str(e)
+            logger.error(f"Gemini SDK 請求失敗: {error_msg}")
+
+            # 返回錯誤訊息而不是拋出異常
+            yield ("assistant", f"⚠️ Gemini API 錯誤: {error_msg[:200]}")
+            yield ("finish", "stop")

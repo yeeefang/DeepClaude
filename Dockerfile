@@ -9,6 +9,7 @@ RUN pip install --no-cache-dir \
     aiohttp==3.11.11 \
     colorlog==6.9.0 \
     fastapi==0.115.8 \
+    google-generativeai>=0.8.3 \
     python-dotenv==1.0.1 \
     pyyaml==6.0.2 \
     tiktoken==0.8.0 \
