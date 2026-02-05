@@ -47,23 +47,29 @@ class GeminiClient(BaseClient):
         """轉換 OpenAI 格式訊息到 Gemini 格式
 
         OpenAI: [{"role": "user", "content": "text"}]
-        Gemini: [{"parts": [{"text": "text"}]}]
+        Gemini: {"contents": [{"parts": [{"text": "text"}]}]} (無 role 字段)
         """
         gemini_contents = []
+        system_message = None
+
         for msg in messages:
             role = msg.get("role", "user")
             content = msg.get("content", "")
 
-            # Gemini 只支援 user/model role
+            # 保存 system message 稍後合併
             if role == "system":
-                # System messages 合併到第一個 user message
+                system_message = content
                 continue
 
-            gemini_role = "model" if role == "assistant" else "user"
+            # Gemini API 不接受 role 字段在 contents 中
+            # 直接構建 parts 格式
             gemini_contents.append({
-                "role": gemini_role,
                 "parts": [{"text": content}]
             })
+
+        # 如果有 system message，插入到開頭
+        if system_message and gemini_contents:
+            gemini_contents[0]["parts"][0]["text"] = f"{system_message}\n\n{gemini_contents[0]['parts'][0]['text']}"
 
         return gemini_contents
 
