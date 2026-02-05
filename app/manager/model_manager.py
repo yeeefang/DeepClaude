@@ -116,24 +116,33 @@ class ModelManager:
         # 如果已经有缓存的实例，直接返回
         if model_name in self.model_instances:
             return self.model_instances[model_name]
-        
+
         # 获取模型详细配置
         reasoner_config, target_config = self.get_model_details(model_name)
-        
+
         # 获取代理配置
         proxy_config = self.config.get("proxy", {})
         proxy = None
         if proxy_config.get("proxy_open", False):
             proxy = proxy_config.get("proxy_address")
             logger.info(f"模型 {model_name} 将使用代理: {proxy}")
-        
+
         # 默认设置为True, 和默认行为保持一致（只要全局开始proxy_open, 则模型默认开启proxy_open）
         reasoner_proxy = proxy if reasoner_config.get('proxy_open', True) else None
         target_proxy = proxy if target_config.get('proxy_open', True) else None
-        
+
         # 获取系统配置
         system_config = self.config.get("system", {})
-        
+
+        # 检查是否为相同模型（推理与执行使用同一模型）
+        composite_config = self.config["composite_models"].get(model_name, {})
+        reasoner_name = composite_config.get("reasoner_models")
+        target_name = composite_config.get("target_models")
+        is_same_model = (reasoner_name == target_name)
+
+        if is_same_model:
+            logger.info(f"模型 {model_name} 使用单一模型模式: {reasoner_name}")
+
         # 创建模型实例
         if target_config.get("model_format", "") == "anthropic":
             # 创建 DeepClaude 实例
@@ -147,6 +156,7 @@ class ModelManager:
                 reasoner_proxy=reasoner_proxy,
                 target_proxy=target_proxy,
                 system_config=system_config,
+                is_same_model=is_same_model,
             )
         else:
             # 创建 OpenAICompatibleComposite 实例
@@ -159,8 +169,9 @@ class ModelManager:
                 reasoner_proxy=reasoner_proxy,
                 target_proxy=target_proxy,
                 system_config=system_config,
+                is_same_model=is_same_model,
             )
-        
+
         # 缓存实例
         self.model_instances[model_name] = instance
         return instance

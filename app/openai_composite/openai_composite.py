@@ -27,10 +27,12 @@ class OpenAICompatibleComposite:
         is_origin_reasoning: bool = True,
         reasoner_proxy: str = None,
         target_proxy: str = None,
-        system_config: dict = None
+        system_config: dict = None,
+        is_same_model: bool = False
     ):
         """初始化 API 客戶端"""
         self.system_config = system_config or {}
+        self.is_same_model = is_same_model
         self.deepseek_client = DeepSeekClient(
             deepseek_api_key,
             deepseek_api_url,
@@ -69,6 +71,12 @@ class OpenAICompatibleComposite:
         async def process_deepseek():
             logger.info(f"開始處理 DeepSeek 流，使用模型：{deepseek_model}")
             try:
+                # 若為單一模型模式，跳過推理流程
+                if self.is_same_model:
+                    logger.info("單一模型模式：跳過推理階段")
+                    await reasoning_queue.put("")
+                    return
+
                 async for content_type, content in self.deepseek_client.stream_chat(
                     messages, deepseek_model, self.is_origin_reasoning
                 ):
@@ -139,10 +147,12 @@ class OpenAICompatibleComposite:
                     raise ValueError("最後一則訊息的角色不是使用者，無法處理請求")
 
                 # Optimized bridge prompt
-                original_content = last_message["content"]
-                last_message["content"] = _build_bridge_content(
-                    original_content, reasoning, self.system_config
-                )
+                # Skip bridge if same model or no reasoning
+                if not self.is_same_model and reasoning and reasoning != "（無推理內容）":
+                    original_content = last_message["content"]
+                    last_message["content"] = _build_bridge_content(
+                        original_content, reasoning, self.system_config
+                    )
 
                 logger.info(f"開始處理 OpenAI 兼容流，使用模型: {target_model}, tools={len(tools) if tools else 0}")
 
