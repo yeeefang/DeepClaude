@@ -9,6 +9,7 @@ import tiktoken
 
 from app.clients import ClaudeClient, DeepSeekClient
 from app.utils.logger import logger
+from app.utils.xml_tool_filter import StreamXMLFilter
 
 
 class DeepClaude:
@@ -225,6 +226,7 @@ Based on this reasoning, combined with your knowledge, when the current reasonin
                 if system_content:
                     logger.debug(f"使用系统提示: {system_content[:100]}...")
 
+                xml_filter = StreamXMLFilter()
                 async for content_type, content in self.claude_client.stream_chat(
                     messages=claude_messages,
                     model_arg=model_arg,
@@ -232,6 +234,10 @@ Based on this reasoning, combined with your knowledge, when the current reasonin
                     system_prompt=system_content
                 ):
                     if content_type == "answer":
+                        # Filter out XML tool call markup from Claude's output
+                        filtered = xml_filter.process(content)
+                        if not filtered:
+                            continue
                         response = {
                             "id": chat_id,
                             "object": "chat.completion.chunk",
@@ -240,7 +246,7 @@ Based on this reasoning, combined with your knowledge, when the current reasonin
                             "choices": [
                                 {
                                     "index": 0,
-                                    "delta": {"role": "assistant", "content": content},
+                                    "delta": {"role": "assistant", "content": filtered},
                                 }
                             ],
                         }
@@ -390,6 +396,7 @@ Based on this reasoning, combined with your knowledge, when the current reasonin
             if system_content:
                 logger.debug(f"使用系统提示: {system_content[:100]}...")
             
+            xml_filter = StreamXMLFilter()
             async for content_type, content in self.claude_client.stream_chat(
                 messages=claude_messages,
                 model_arg=model_arg,
@@ -398,7 +405,8 @@ Based on this reasoning, combined with your knowledge, when the current reasonin
                 system_prompt=system_content
             ):
                 if content_type == "answer":
-                    answer += content
+                    filtered = xml_filter.process(content)
+                    answer += filtered
                     output_tokens = encoding.encode(answer)  # 更新 output_tokens
                 logger.debug(f"输出 Tokens: {len(output_tokens)}")
 

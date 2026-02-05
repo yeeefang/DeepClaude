@@ -9,6 +9,7 @@ from fastapi.responses import StreamingResponse
 from app.deepclaude.deepclaude import DeepClaude
 from app.openai_composite import OpenAICompatibleComposite
 from app.utils.logger import logger
+from app.utils.xml_tool_filter import clean_messages
 
 
 class ModelManager:
@@ -249,6 +250,9 @@ class ModelManager:
         # 验证和准备参数
         messages, model, model_args = self.validate_and_prepare_params(body)
         temperature, top_p, presence_penalty, frequency_penalty, stream = model_args
+
+        # 清理消息中的 XML tool 标签，防止目标模型输出 XML tool calls
+        messages = clean_messages(messages)
 
         # 模型参数，不包含 stream
         model_params = (temperature, top_p, presence_penalty, frequency_penalty)

@@ -8,6 +8,7 @@ from typing import AsyncGenerator, Dict, Any, List
 from app.clients import DeepSeekClient
 from app.clients.openai_compatible_client import OpenAICompatibleClient
 from app.utils.logger import logger
+from app.utils.xml_tool_filter import StreamXMLFilter
 
 
 class OpenAICompatibleComposite:
@@ -202,6 +203,7 @@ Based on this reasoning, combined with your knowledge, when the current reasonin
 
                 logger.info(f"开始处理 OpenAI 兼容流，使用模型: {target_model}")
 
+                xml_filter = StreamXMLFilter()
                 async for role, content in self.openai_client.stream_chat(
                     messages=openai_messages,
                     model=target_model,
@@ -228,7 +230,12 @@ Based on this reasoning, combined with your knowledge, when the current reasonin
                         )
                         logger.debug("结束响应已发送到队列")
                         break
-                    
+
+                    # Filter XML tool call markup from output
+                    filtered_content = xml_filter.process(content)
+                    if not filtered_content:
+                        continue
+
                     # 正常内容响应
                     response = {
                         "id": chat_id,
@@ -238,7 +245,7 @@ Based on this reasoning, combined with your knowledge, when the current reasonin
                         "choices": [
                             {
                                 "index": 0,
-                                "delta": {"role": role, "content": content},
+                                "delta": {"role": role, "content": filtered_content},
                             }
                         ],
                     }
