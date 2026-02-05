@@ -234,6 +234,11 @@ function applyFormatPresets(form, format, modelType) {
             }
         },
         anthropic: {
+            reasoner: {
+                base_url: 'https://api.anthropic.com',
+                request_address: 'v1/messages',
+                is_origin_reasoning: false
+            },
             target: {
                 base_url: 'https://api.anthropic.com',
                 request_address: 'v1/messages'

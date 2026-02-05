@@ -46,7 +46,7 @@ class GeminiComposite:
         messages: List[Dict[str, str]],
         model_arg: tuple[float, float, float, float],
         deepseek_model: str = "deepseek-reasoner",
-        gemini_model: str = "gemini-2.5-flash-preview-04-17",
+        target_model: str = "gemini-2.5-flash-preview-04-17",
         tools: Optional[List[Dict[str, Any]]] = None,
         tool_choice: Optional[Any] = None,
         stream_options: Optional[Dict[str, Any]] = None,
@@ -57,7 +57,7 @@ class GeminiComposite:
             messages: 訊息列表
             model_arg: (temperature, top_p, presence_penalty, frequency_penalty)
             deepseek_model: DeepSeek 模型名稱
-            gemini_model: Gemini 模型名稱
+            target_model: Gemini 模型名稱
             tools: 工具定義 (Gemini 不支援)
             tool_choice: 工具選擇 (Gemini 不支援)
             stream_options: 串流選項
@@ -159,14 +159,14 @@ class GeminiComposite:
                         original_content, reasoning, self.system_config
                     )
 
-                logger.info(f"開始處理 Gemini 流，使用模型: {gemini_model}")
+                logger.info(f"開始處理 Gemini 流，使用模型: {target_model}")
 
                 xml_filter = StreamXMLFilter()
 
                 async for content_type, content in self.gemini_client.stream_chat(
                     messages=gemini_messages,
                     model_arg=model_arg,
-                    model=gemini_model,
+                    model=target_model,
                     tools=tools,
                     tool_choice=tool_choice,
                 ):
@@ -180,7 +180,7 @@ class GeminiComposite:
                             "id": chat_id,
                             "object": "chat.completion.chunk",
                             "created": created_time,
-                            "model": gemini_model,
+                            "model": target_model,
                             "choices": [{
                                 "index": 0,
                                 "delta": {"role": "assistant", "content": filtered},
@@ -194,7 +194,7 @@ class GeminiComposite:
                             "id": chat_id,
                             "object": "chat.completion.chunk",
                             "created": created_time,
-                            "model": gemini_model,
+                            "model": target_model,
                             "choices": [{
                                 "index": 0,
                                 "delta": {},
@@ -210,7 +210,7 @@ class GeminiComposite:
                                 "id": chat_id,
                                 "object": "chat.completion.chunk",
                                 "created": created_time,
-                                "model": gemini_model,
+                                "model": target_model,
                                 "choices": [],
                                 "usage": {
                                     "prompt_tokens": 0,
@@ -227,7 +227,7 @@ class GeminiComposite:
 
             except Exception as e:
                 logger.error(f"處理 Gemini 流時發生錯誤: {e}")
-                error_response = _build_error_response(chat_id, created_time, gemini_model, e)
+                error_response = _build_error_response(chat_id, created_time, target_model, e)
                 await output_queue.put(f"data: {json.dumps(error_response)}\n\n".encode("utf-8"))
                 await output_queue.put(b"data: [DONE]\n\n")
             finally:
@@ -259,7 +259,7 @@ class GeminiComposite:
         messages: List[Dict[str, str]],
         model_arg: tuple[float, float, float, float],
         deepseek_model: str = "deepseek-reasoner",
-        gemini_model: str = "gemini-2.5-flash-preview-04-17",
+        target_model: str = "gemini-2.5-flash-preview-04-17",
         tools: Optional[List[Dict[str, Any]]] = None,
         tool_choice: Optional[Any] = None,
     ) -> Dict[str, Any]:
@@ -269,7 +269,7 @@ class GeminiComposite:
         finish_reason = "stop"
 
         async for chunk in self.chat_completions_with_stream(
-            messages, model_arg, deepseek_model, gemini_model, tools, tool_choice,
+            messages, model_arg, deepseek_model, target_model, tools, tool_choice,
             stream_options={"include_usage": True}
         ):
             chunk_str = chunk.decode("utf-8")
@@ -294,7 +294,7 @@ class GeminiComposite:
             "id": f"chatcmpl-{hex(int(time.time() * 1000))[2:]}",
             "object": "chat.completion",
             "created": int(time.time()),
-            "model": gemini_model,
+            "model": target_model,
             "choices": [{
                 "index": 0,
                 "message": {

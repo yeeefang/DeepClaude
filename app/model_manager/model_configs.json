@@ -19,6 +19,16 @@
             "is_origin_reasoning": false,
             "is_valid": true,
             "proxy_open": false
+        },
+        "Claude/Sonnet-4.5": {
+            "model_id": "claude-sonnet-4-5-20250929",
+            "api_key": "**************",
+            "api_base_url": "https://api.anthropic.com",
+            "api_request_address": "v1/messages",
+            "model_format": "anthropic",
+            "is_origin_reasoning": false,
+            "is_valid": false,
+            "proxy_open": false
         }
     },
     "target_models": {
