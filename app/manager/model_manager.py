@@ -1,4 +1,4 @@
-"""模型管理器，负责处理模型选择、参数验证和请求处理"""
+"""模型管理器，負責處理模型選擇、參數驗證和請求處理"""
 
 import os
 import json
@@ -13,7 +13,7 @@ from app.utils.xml_tool_filter import clean_messages
 
 
 class ModelManager:
-    """模型管理器，负责创建和管理模型实例，处理请求参数"""
+    """模型管理器，負責建立和管理模型實例，處理請求參數"""
 
     def __init__(self):
         """初始化模型管理器"""
@@ -165,53 +165,57 @@ class ModelManager:
         self.model_instances[model_name] = instance
         return instance
 
-    def validate_and_prepare_params(self, body: Dict[str, Any]) -> Tuple[List[Dict[str, str]], str, Tuple[float, float, float, float, bool], Optional[List[Dict[str, Any]]], Optional[Any]]:
-        """验证和准备请求参数
+    def validate_and_prepare_params(self, body: Dict[str, Any]) -> Tuple[List[Dict[str, str]], str, Tuple[float, float, float, float, bool], Optional[List[Dict[str, Any]]], Optional[Any], Optional[Dict[str, Any]]]:
+        """驗證和準備請求參數
 
         Args:
-            body: 请求体
+            body: 請求體
 
         Returns:
             Tuple containing:
-                - 消息列表
-                - 模型名称
+                - 訊息列表
+                - 模型名稱
                 - (temperature, top_p, presence_penalty, frequency_penalty, stream)
-                - tools (OpenAI格式工具定义列表，可能为None)
-                - tool_choice (工具选择策略，可能为None)
+                - tools (OpenAI 格式工具定義列表，可能為 None)
+                - tool_choice (工具選擇策略，可能為 None)
+                - stream_options (串流選項，如 {"include_usage": true}，可能為 None)
 
         Raises:
-            ValueError: 参数验证失败时抛出
+            ValueError: 參數驗證失敗時拋出
         """
-        # 获取基础信息
+        # 取得基礎資訊
         messages = body.get("messages")
         model = body.get("model")
 
         if not model:
-            raise ValueError("必须指定模型名称")
+            raise ValueError("必須指定模型名稱")
 
         if not messages:
-            raise ValueError("消息列表不能为空")
+            raise ValueError("訊息列表不能為空")
 
-        # 验证并提取参数
+        # 驗證並提取參數
         temperature: float = body.get("temperature", 0.5)
         top_p = body.get("top_p")  # None if not explicitly provided; DeepSeek API rejects both temperature and top_p
         presence_penalty: float = body.get("presence_penalty", 0.0)
         frequency_penalty: float = body.get("frequency_penalty", 0.0)
         stream: bool = body.get("stream", False)
 
-        # 提取工具相关参数
+        # 提取工具相關參數
         tools = body.get("tools")  # OpenAI format tool definitions
         tool_choice = body.get("tool_choice")  # Tool selection strategy
 
+        # 提取串流選項 (OpenAI spec: stream_options.include_usage for token counting in streaming)
+        stream_options = body.get("stream_options")
+
         if tools:
-            logger.info(f"请求包含 {len(tools)} 个工具定义")
+            logger.info(f"請求包含 {len(tools)} 個工具定義")
 
-        # 模型特定验证
-        if "sonnet" in model:  # Sonnet 模型温度必须在 0 到 1 之间
+        # 模型特定驗證
+        if "sonnet" in model.lower():  # Sonnet 模型溫度必須在 0 到 1 之間
             if not isinstance(temperature, (float, int)) or temperature < 0.0 or temperature > 1.0:
-                raise ValueError("Sonnet 设定 temperature 必须在 0 到 1 之间")
+                raise ValueError("Sonnet 設定 temperature 必須在 0 到 1 之間")
 
-        return messages, model, (temperature, top_p, presence_penalty, frequency_penalty, stream), tools, tool_choice
+        return messages, model, (temperature, top_p, presence_penalty, frequency_penalty, stream), tools, tool_choice, stream_options
 
     def get_model_list(self) -> List[Dict[str, Any]]:
         """获取可用模型列表
@@ -247,34 +251,34 @@ class ModelManager:
         return models
 
     async def process_request(self, body: Dict[str, Any]) -> Any:
-        """处理聊天完成请求
+        """處理聊天完成請求
 
         Args:
-            body: 请求体
+            body: 請求體
 
         Returns:
-            Any: 响应对象，可能是 StreamingResponse 或 Dict
+            Any: 回應物件，可能是 StreamingResponse 或 Dict
 
         Raises:
-            ValueError: 参数验证或处理失败时抛出
+            ValueError: 參數驗證或處理失敗時拋出
         """
-        # 验证和准备参数
-        messages, model, model_args, tools, tool_choice = self.validate_and_prepare_params(body)
+        # 驗證和準備參數
+        messages, model, model_args, tools, tool_choice, stream_options = self.validate_and_prepare_params(body)
         temperature, top_p, presence_penalty, frequency_penalty, stream = model_args
 
-        # 清理消息中的 XML tool 标签，防止目标模型输出 XML tool calls
+        # 清理訊息中的 XML tool 標籤，防止目標模型輸出 XML tool calls
         messages = clean_messages(messages)
 
-        # 模型参数，不包含 stream
+        # 模型參數，不包含 stream
         model_params = (temperature, top_p, presence_penalty, frequency_penalty)
 
-        # 获取模型详细配置
+        # 取得模型詳細設定
         reasoner_config, target_config = self.get_model_details(model)
 
-        # 获取模型实例
+        # 取得模型實例
         model_instance = self._get_model_instance(model)
 
-        # 处理请求
+        # 處理請求
         if target_config.get("model_format", "") == "anthropic":
             # 使用 DeepClaude
             if stream:
@@ -286,6 +290,7 @@ class ModelManager:
                         claude_model=target_config["model_id"],
                         tools=tools,
                         tool_choice=tool_choice,
+                        stream_options=stream_options,
                     ),
                     media_type="text/event-stream",
                 )
@@ -299,7 +304,7 @@ class ModelManager:
                     tool_choice=tool_choice,
                 )
         else:
-            # 使用 OpenAI 兼容组合模型
+            # 使用 OpenAI 兼容組合模型
             if stream:
                 return StreamingResponse(
                     model_instance.chat_completions_with_stream(
@@ -309,6 +314,7 @@ class ModelManager:
                         target_model=target_config["model_id"],
                         tools=tools,
                         tool_choice=tool_choice,
+                        stream_options=stream_options,
                     ),
                     media_type="text/event-stream",
                 )

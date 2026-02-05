@@ -1,18 +1,22 @@
-"""OpenAI 兼容的组合模型服务，用于协调 DeepSeek 和其他 OpenAI 兼容模型的调用"""
+"""OpenAI 兼容的組合模型服務，用於協調 DeepSeek 和其他 OpenAI 兼容模型的調用"""
 
 import asyncio
+import copy
 import json
 import time
 from typing import AsyncGenerator, Dict, Any, List, Optional
+
+import tiktoken
 
 from app.clients import DeepSeekClient
 from app.clients.openai_compatible_client import OpenAICompatibleClient
 from app.utils.logger import logger
 from app.utils.xml_tool_filter import StreamXMLFilter
+from app.deepclaude.deepclaude import _build_bridge_content
 
 
 class OpenAICompatibleComposite:
-    """处理 DeepSeek 和其他 OpenAI 兼容模型的流式输出衔接"""
+    """處理 DeepSeek 和其他 OpenAI 兼容模型的流式輸出銜接"""
 
     def __init__(
         self,
@@ -25,7 +29,7 @@ class OpenAICompatibleComposite:
         target_proxy: str = None,
         system_config: dict = None
     ):
-        """初始化 API 客户端"""
+        """初始化 API 客戶端"""
         self.system_config = system_config or {}
         self.deepseek_client = DeepSeekClient(
             deepseek_api_key,
@@ -44,16 +48,26 @@ class OpenAICompatibleComposite:
         target_model: str = "",
         tools: Optional[List[Dict[str, Any]]] = None,
         tool_choice: Optional[Any] = None,
+        stream_options: Optional[Dict[str, Any]] = None,
     ) -> AsyncGenerator[bytes, None]:
-        """处理完整的流式输出过程"""
+        """處理完整的流式輸出過程"""
         chat_id = f"chatcmpl-{hex(int(time.time() * 1000))[2:]}"
         created_time = int(time.time())
         output_queue = asyncio.Queue()
         reasoning_queue = asyncio.Queue()
         reasoning_content = []
 
+        include_usage = bool(stream_options and stream_options.get("include_usage"))
+        completion_token_count = 0
+        encoding = None
+        if include_usage:
+            try:
+                encoding = tiktoken.encoding_for_model("gpt-4o")
+            except Exception:
+                encoding = tiktoken.get_encoding("cl100k_base")
+
         async def process_deepseek():
-            logger.info(f"开始处理 DeepSeek 流，使用模型：{deepseek_model}")
+            logger.info(f"開始處理 DeepSeek 流，使用模型：{deepseek_model}")
             try:
                 async for content_type, content in self.deepseek_client.stream_chat(
                     messages, deepseek_model, self.is_origin_reasoning
@@ -79,50 +93,58 @@ class OpenAICompatibleComposite:
                         )
                     elif content_type == "content":
                         logger.info(
-                            f"DeepSeek 推理完成，收集到的推理内容长度：{len(''.join(reasoning_content))}"
+                            f"DeepSeek 推理完成，收集到的推理內容長度：{len(''.join(reasoning_content))}"
                         )
                         await reasoning_queue.put("".join(reasoning_content))
                         break
             except Exception as e:
-                logger.error(f"处理 DeepSeek 流时发生错误: {e}")
+                logger.error(f"處理 DeepSeek 流時發生錯誤: {e}")
                 error_response = _build_error_response(chat_id, created_time, deepseek_model, e)
                 await output_queue.put(f"data: {json.dumps(error_response)}\n\n".encode("utf-8"))
                 await output_queue.put(b"data: [DONE]\n\n")
+                # FIX: Always notify target task to prevent deadlock
+                await reasoning_queue.put("")
                 await output_queue.put(None)
                 return
-            logger.info("DeepSeek 任务处理完成，标记结束")
+
+            # FIX: Ensure reasoning_queue is always populated
+            if reasoning_queue.empty():
+                await reasoning_queue.put("".join(reasoning_content))
+
+            logger.info("DeepSeek 任務處理完成，標記結束")
             await output_queue.put(None)
 
         async def process_openai():
+            nonlocal completion_token_count
             try:
-                logger.info("等待获取 DeepSeek 的推理内容...")
-                reasoning = await reasoning_queue.get()
-                logger.debug(
-                    f"获取到推理内容，内容长度：{len(reasoning) if reasoning else 0}"
-                )
-                if not reasoning:
-                    logger.warning("未能获取到有效的推理内容，将使用默认提示继续")
-                    reasoning = "获取推理内容失败"
+                logger.info("等待取得 DeepSeek 的推理內容...")
+                try:
+                    reasoning = await asyncio.wait_for(reasoning_queue.get(), timeout=300)
+                except asyncio.TimeoutError:
+                    logger.error("等待 DeepSeek 推理內容逾時 (300s)")
+                    reasoning = ""
 
-                openai_messages = messages.copy()
-                combined_content = f"""
-                ******The above is user information*****
-The following is the reasoning process of another model:****\n{reasoning}\n\n ****
-Based on this reasoning, combined with your knowledge, when the current reasoning conflicts with your knowledge, you are more confident that you can adopt your own knowledge, which is completely acceptable. Please provide the user with a complete answer directly.
-***Notice, Here is your settings: SELF_TALK: off REASONING: off THINKING: off PLANNING: off THINKING_BUDGET: < 100 tokens ***:"""
+                if not reasoning:
+                    logger.warning("未能取得有效的推理內容，將使用預設提示繼續")
+                    reasoning = "（無推理內容）"
+
+                # FIX: Deep copy to avoid mutating original messages
+                openai_messages = copy.deepcopy(messages)
 
                 if not openai_messages:
-                    raise ValueError("消息列表为空，无法处理请求")
+                    raise ValueError("訊息列表為空，無法處理請求")
 
                 last_message = openai_messages[-1]
                 if last_message.get("role", "") != "user":
-                    raise ValueError("最后一个消息的角色不是用户，无法处理请求")
+                    raise ValueError("最後一則訊息的角色不是使用者，無法處理請求")
 
+                # Optimized bridge prompt
                 original_content = last_message["content"]
-                fixed_content = f"Here's my original input:\n{original_content}\n\n{combined_content}"
-                last_message["content"] = fixed_content
+                last_message["content"] = _build_bridge_content(
+                    original_content, reasoning, self.system_config
+                )
 
-                logger.info(f"开始处理 OpenAI 兼容流，使用模型: {target_model}, tools={len(tools) if tools else 0}")
+                logger.info(f"開始處理 OpenAI 兼容流，使用模型: {target_model}, tools={len(tools) if tools else 0}")
 
                 xml_filter = StreamXMLFilter()
 
@@ -132,133 +154,87 @@ Based on this reasoning, combined with your knowledge, when the current reasonin
                     tools=tools,
                     tool_choice=tool_choice,
                 ):
-                    # Check for finish reason (legacy dict format)
                     if isinstance(content, dict) and content.get("finish_reason") == "stop":
-                        logger.debug("收到 finish_reason=stop，准备发送结束响应")
                         flushed = xml_filter.flush()
                         if flushed:
+                            if encoding:
+                                completion_token_count += len(encoding.encode(flushed))
                             flush_resp = {
                                 "id": chat_id,
                                 "object": "chat.completion.chunk",
                                 "created": created_time,
                                 "model": target_model,
-                                "choices": [{
-                                    "index": 0,
-                                    "delta": {"role": "assistant", "content": flushed},
-                                }],
+                                "choices": [{"index": 0, "delta": {"role": "assistant", "content": flushed}}],
                             }
-                            await output_queue.put(
-                                f"data: {json.dumps(flush_resp)}\n\n".encode("utf-8")
-                            )
+                            await output_queue.put(f"data: {json.dumps(flush_resp)}\n\n".encode("utf-8"))
                         end_response = {
                             "id": chat_id,
                             "object": "chat.completion.chunk",
                             "created": created_time,
                             "model": target_model,
-                            "choices": [{
-                                "delta": {},
-                                "finish_reason": "stop",
-                                "index": 0,
-                            }],
+                            "choices": [{"delta": {}, "finish_reason": "stop", "index": 0}],
                         }
-                        await output_queue.put(
-                            f"data: {json.dumps(end_response)}\n\n".encode("utf-8")
-                        )
+                        await output_queue.put(f"data: {json.dumps(end_response)}\n\n".encode("utf-8"))
                         break
 
-                    # Handle tool_calls_delta
                     if role == "tool_calls_delta":
                         flushed = xml_filter.flush()
                         if flushed:
+                            if encoding:
+                                completion_token_count += len(encoding.encode(flushed))
                             flush_resp = {
-                                "id": chat_id,
-                                "object": "chat.completion.chunk",
-                                "created": created_time,
+                                "id": chat_id, "object": "chat.completion.chunk", "created": created_time,
                                 "model": target_model,
-                                "choices": [{
-                                    "index": 0,
-                                    "delta": {"role": "assistant", "content": flushed},
-                                }],
+                                "choices": [{"index": 0, "delta": {"role": "assistant", "content": flushed}}],
                             }
-                            await output_queue.put(
-                                f"data: {json.dumps(flush_resp)}\n\n".encode("utf-8")
-                            )
-
+                            await output_queue.put(f"data: {json.dumps(flush_resp)}\n\n".encode("utf-8"))
                         response = {
-                            "id": chat_id,
-                            "object": "chat.completion.chunk",
-                            "created": created_time,
+                            "id": chat_id, "object": "chat.completion.chunk", "created": created_time,
                             "model": target_model,
-                            "choices": [{
-                                "index": 0,
-                                "delta": {"tool_calls": content},
-                            }],
+                            "choices": [{"index": 0, "delta": {"tool_calls": content}}],
                         }
-                        await output_queue.put(
-                            f"data: {json.dumps(response)}\n\n".encode("utf-8")
-                        )
+                        await output_queue.put(f"data: {json.dumps(response)}\n\n".encode("utf-8"))
                         continue
 
-                    # Handle finish signal
                     if role == "finish":
                         flushed = xml_filter.flush()
                         if flushed:
+                            if encoding:
+                                completion_token_count += len(encoding.encode(flushed))
                             flush_resp = {
-                                "id": chat_id,
-                                "object": "chat.completion.chunk",
-                                "created": created_time,
+                                "id": chat_id, "object": "chat.completion.chunk", "created": created_time,
                                 "model": target_model,
-                                "choices": [{
-                                    "index": 0,
-                                    "delta": {"role": "assistant", "content": flushed},
-                                }],
+                                "choices": [{"index": 0, "delta": {"role": "assistant", "content": flushed}}],
                             }
-                            await output_queue.put(
-                                f"data: {json.dumps(flush_resp)}\n\n".encode("utf-8")
-                            )
+                            await output_queue.put(f"data: {json.dumps(flush_resp)}\n\n".encode("utf-8"))
                         response = {
-                            "id": chat_id,
-                            "object": "chat.completion.chunk",
-                            "created": created_time,
+                            "id": chat_id, "object": "chat.completion.chunk", "created": created_time,
                             "model": target_model,
-                            "choices": [{
-                                "index": 0,
-                                "delta": {},
-                                "finish_reason": content,
-                            }],
+                            "choices": [{"index": 0, "delta": {}, "finish_reason": content}],
                         }
-                        await output_queue.put(
-                            f"data: {json.dumps(response)}\n\n".encode("utf-8")
-                        )
+                        await output_queue.put(f"data: {json.dumps(response)}\n\n".encode("utf-8"))
                         break
 
-                    # Normal text content - filter XML tool call markup
                     filtered_content = xml_filter.process(content)
                     if not filtered_content:
                         continue
-
+                    if encoding:
+                        completion_token_count += len(encoding.encode(filtered_content))
                     response = {
-                        "id": chat_id,
-                        "object": "chat.completion.chunk",
-                        "created": created_time,
+                        "id": chat_id, "object": "chat.completion.chunk", "created": created_time,
                         "model": target_model,
-                        "choices": [{
-                            "index": 0,
-                            "delta": {"role": role, "content": filtered_content},
-                        }],
+                        "choices": [{"index": 0, "delta": {"role": role, "content": filtered_content}}],
                     }
-                    await output_queue.put(
-                        f"data: {json.dumps(response)}\n\n".encode("utf-8")
-                    )
+                    await output_queue.put(f"data: {json.dumps(response)}\n\n".encode("utf-8"))
 
             except Exception as e:
-                logger.error(f"处理 OpenAI 兼容流时发生错误: {e}")
+                logger.error(f"處理 OpenAI 兼容流時發生錯誤: {e}")
                 error_response = _build_error_response(chat_id, created_time, target_model, e)
                 await output_queue.put(f"data: {json.dumps(error_response)}\n\n".encode("utf-8"))
                 await output_queue.put(b"data: [DONE]\n\n")
                 await output_queue.put(None)
                 return
-            logger.info("OpenAI 兼容任务处理完成，标记结束")
+            logger.info("OpenAI 兼容任務處理完成，標記結束")
             await output_queue.put(None)
 
         asyncio.create_task(process_deepseek())
@@ -269,12 +245,27 @@ Based on this reasoning, combined with your knowledge, when the current reasonin
             item = await output_queue.get()
             if item is None:
                 finished_tasks += 1
-                logger.debug(f"任务完成计数: {finished_tasks}/2")
                 continue
-            logger.debug(f"主循环输出数据: {item.decode('utf-8')[:100] if len(item) > 100 else item.decode('utf-8')}")
             yield item
 
-        logger.debug("所有任务完成，发送结束标记")
+        # Streaming usage chunk (OpenAI spec: stream_options.include_usage)
+        if include_usage and encoding:
+            prompt_text = "\n".join(
+                msg.get("content", "") for msg in messages
+                if isinstance(msg.get("content", ""), str)
+            )
+            prompt_token_count = len(encoding.encode(prompt_text))
+            usage_chunk = {
+                "id": chat_id, "object": "chat.completion.chunk", "created": created_time,
+                "model": target_model, "choices": [],
+                "usage": {
+                    "prompt_tokens": prompt_token_count,
+                    "completion_tokens": completion_token_count,
+                    "total_tokens": prompt_token_count + completion_token_count,
+                },
+            }
+            yield f"data: {json.dumps(usage_chunk)}\n\n".encode("utf-8")
+
         yield b"data: [DONE]\n\n"
 
     async def chat_completions_without_stream(
@@ -286,7 +277,7 @@ Based on this reasoning, combined with your knowledge, when the current reasonin
         tools: Optional[List[Dict[str, Any]]] = None,
         tool_choice: Optional[Any] = None,
     ) -> Dict[str, Any]:
-        """处理非流式输出请求"""
+        """處理非流式輸出請求"""
         full_response = {
             "id": f"chatcmpl-{hex(int(time.time() * 1000))[2:]}",
             "object": "chat.completion",
@@ -302,19 +293,17 @@ Based on this reasoning, combined with your knowledge, when the current reasonin
         finish_reason = "stop"
 
         try:
+            # Pass include_usage so we get token counts from streaming
             async for chunk in self.chat_completions_with_stream(
-                messages, model_arg, deepseek_model, target_model, tools, tool_choice
+                messages, model_arg, deepseek_model, target_model, tools, tool_choice,
+                stream_options={"include_usage": True},
             ):
                 if chunk != b"data: [DONE]\n\n":
                     try:
                         response_data = json.loads(chunk.decode("utf-8")[6:])
-                        if (
-                            "choices" in response_data
-                            and len(response_data["choices"]) > 0
-                        ):
+                        if "choices" in response_data and len(response_data["choices"]) > 0:
                             choice = response_data["choices"][0]
                             delta = choice.get("delta", {})
-
                             if "content" in delta and delta["content"]:
                                 content_parts.append(delta["content"])
                             if "reasoning_content" in delta and delta["reasoning_content"]:
@@ -334,10 +323,12 @@ Based on this reasoning, combined with your knowledge, when the current reasonin
                                             tool_calls_list[idx]["function"]["name"] = tc_delta["function"]["name"]
                                         if "arguments" in tc_delta["function"]:
                                             tool_calls_list[idx]["function"]["arguments"] += tc_delta["function"]["arguments"]
-
                             fr = choice.get("finish_reason")
                             if fr:
                                 finish_reason = fr
+                        # Capture usage from the streaming usage chunk
+                        if "usage" in response_data and response_data["usage"]:
+                            full_response["usage"] = response_data["usage"]
                     except json.JSONDecodeError:
                         continue
 
@@ -355,9 +346,23 @@ Based on this reasoning, combined with your knowledge, when the current reasonin
                 "finish_reason": finish_reason,
             }]
 
+            # Fallback: estimate tokens if streaming didn't provide usage
+            if not full_response.get("usage"):
+                try:
+                    enc = tiktoken.encoding_for_model("gpt-4o")
+                except Exception:
+                    enc = tiktoken.get_encoding("cl100k_base")
+                prompt_text = "\n".join(
+                    msg.get("content", "") for msg in messages
+                    if isinstance(msg.get("content", ""), str)
+                )
+                pt = len(enc.encode(prompt_text))
+                ct = len(enc.encode("".join(content_parts))) if content_parts else 0
+                full_response["usage"] = {"prompt_tokens": pt, "completion_tokens": ct, "total_tokens": pt + ct}
+
             return full_response
         except Exception as e:
-            logger.error(f"处理非流式请求时发生错误: {e}")
+            logger.error(f"處理非流式請求時發生錯誤: {e}")
             raise e
 
 
@@ -370,16 +375,12 @@ def _build_error_response(chat_id: str, created_time: int, model: str, error: Ex
         "code": "invalid_request_error",
     }
     if "Input length" in error_message:
-        error_info["message"] = "输入的上下文内容过长，超过了模型的最大处理长度限制。请减少输入内容或分段处理。"
+        error_info["message"] = "輸入的上下文內容過長，超過了模型的最大處理長度限制。請減少輸入內容或分段處理。"
     elif "InvalidParameter" in error_message:
-        error_info["message"] = "请求参数无效，请检查输入内容。"
+        error_info["message"] = "請求參數無效，請檢查輸入內容。"
     elif "BadRequest" in error_message:
-        error_info["message"] = "请求格式错误，请检查输入内容。"
-
+        error_info["message"] = "請求格式錯誤，請檢查輸入內容。"
     return {
-        "id": chat_id,
-        "object": "chat.completion.chunk",
-        "created": created_time,
-        "model": model,
-        "error": error_info,
+        "id": chat_id, "object": "chat.completion.chunk", "created": created_time,
+        "model": model, "error": error_info,
     }

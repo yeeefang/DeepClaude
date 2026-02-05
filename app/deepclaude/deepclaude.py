@@ -1,6 +1,7 @@
-"""DeepClaude 服务，用于协调 DeepSeek 和 Claude API 的调用"""
+"""DeepClaude 服務，用於協調 DeepSeek 和 Claude API 的調用"""
 
 import asyncio
+import copy
 import json
 import time
 from typing import AsyncGenerator, Optional, List, Dict, Any
@@ -12,8 +13,38 @@ from app.utils.logger import logger
 from app.utils.xml_tool_filter import StreamXMLFilter
 
 
+def _condense_reasoning(reasoning: str, max_tokens: int) -> str:
+    """Condense reasoning to fit within max_tokens (approximate).
+
+    Keeps the end of reasoning since conclusions are typically there.
+    Rough estimate: 1 token ~= 3 chars for mixed Chinese/English.
+    """
+    if max_tokens <= 0 or not reasoning:
+        return reasoning
+    max_chars = max_tokens * 3
+    if len(reasoning) <= max_chars:
+        return reasoning
+    return "...\n" + reasoning[-max_chars:]
+
+
+def _build_bridge_content(original_content: str, reasoning: str, system_config: dict) -> str:
+    """Build optimized bridge prompt for target model.
+
+    Minimizes token usage while preserving context.
+    """
+    max_reasoning_tokens = system_config.get("max_reasoning_tokens", 0)
+    condensed = _condense_reasoning(reasoning, max_reasoning_tokens)
+
+    return (
+        f"{original_content}\n\n"
+        f"<reasoning_context>\n{condensed}\n</reasoning_context>\n\n"
+        "Based on the above reasoning, provide a complete answer directly. "
+        "Override with your own knowledge when the reasoning conflicts."
+    )
+
+
 class DeepClaude:
-    """处理 DeepSeek 和 Claude API 的流式输出衔接"""
+    """處理 DeepSeek 和 Claude API 的流式輸出銜接"""
 
     def __init__(
         self,
@@ -27,7 +58,7 @@ class DeepClaude:
         target_proxy: str = None,
         system_config: dict = None
     ):
-        """初始化 API 客户端"""
+        """初始化 API 客戶端"""
         self.system_config = system_config or {}
         self.deepseek_client = DeepSeekClient(
             deepseek_api_key,
@@ -48,16 +79,18 @@ class DeepClaude:
         claude_model: str = "claude-3-5-sonnet-20241022",
         tools: Optional[List[Dict[str, Any]]] = None,
         tool_choice: Optional[Any] = None,
+        stream_options: Optional[Dict[str, Any]] = None,
     ) -> AsyncGenerator[bytes, None]:
-        """处理完整的流式输出过程
+        """處理完整的流式輸出過程
 
         Args:
-            messages: 初始消息列表
-            model_arg: 模型参数
-            deepseek_model: DeepSeek 模型名称
-            claude_model: Claude 模型名称
-            tools: OpenAI格式的工具定义列表
-            tool_choice: 工具选择策略
+            messages: 初始訊息列表
+            model_arg: 模型參數
+            deepseek_model: DeepSeek 模型名稱
+            claude_model: Claude 模型名稱
+            tools: OpenAI 格式的工具定義列表
+            tool_choice: 工具選擇策略
+            stream_options: 串流選項 (e.g. {"include_usage": true})
         """
         chat_id = f"chatcmpl-{hex(int(time.time() * 1000))[2:]}"
         created_time = int(time.time())
@@ -65,8 +98,17 @@ class DeepClaude:
         claude_queue = asyncio.Queue()
         reasoning_content = []
 
+        include_usage = bool(stream_options and stream_options.get("include_usage"))
+        completion_token_count = 0
+        encoding = None
+        if include_usage:
+            try:
+                encoding = tiktoken.encoding_for_model("gpt-4o")
+            except Exception:
+                encoding = tiktoken.get_encoding("cl100k_base")
+
         async def process_deepseek():
-            logger.info(f"开始处理 DeepSeek 流，使用模型：{deepseek_model}")
+            logger.info(f"開始處理 DeepSeek 流，使用模型：{deepseek_model}")
             try:
                 async for content_type, content in self.deepseek_client.stream_chat(
                     messages, deepseek_model, self.is_origin_reasoning
@@ -92,39 +134,45 @@ class DeepClaude:
                         )
                     elif content_type == "content":
                         logger.info(
-                            f"DeepSeek 推理完成，收集到的推理内容长度：{len(''.join(reasoning_content))}"
+                            f"DeepSeek 推理完成，收集到的推理內容長度：{len(''.join(reasoning_content))}"
                         )
                         await claude_queue.put("".join(reasoning_content))
                         break
             except Exception as e:
-                logger.error(f"处理 DeepSeek 流时发生错误: {e}")
+                logger.error(f"處理 DeepSeek 流時發生錯誤: {e}")
                 error_response = _build_error_response(chat_id, created_time, deepseek_model, e)
                 await output_queue.put(f"data: {json.dumps(error_response)}\n\n".encode("utf-8"))
                 await output_queue.put(b"data: [DONE]\n\n")
+                # FIX: Always notify Claude task so it doesn't deadlock
+                await claude_queue.put("")
                 await output_queue.put(None)
                 return
-            logger.info("DeepSeek 任务处理完成，标记结束")
+
+            # FIX: Ensure Claude queue is always populated even if no content signal
+            if claude_queue.empty():
+                await claude_queue.put("".join(reasoning_content))
+
+            logger.info("DeepSeek 任務處理完成，標記結束")
             await output_queue.put(None)
 
         async def process_claude():
+            nonlocal completion_token_count
             try:
-                logger.info("等待获取 DeepSeek 的推理内容...")
-                reasoning = await claude_queue.get()
-                logger.debug(
-                    f"获取到推理内容，内容长度：{len(reasoning) if reasoning else 0}"
-                )
+                logger.info("等待取得 DeepSeek 的推理內容...")
+                try:
+                    reasoning = await asyncio.wait_for(claude_queue.get(), timeout=300)
+                except asyncio.TimeoutError:
+                    logger.error("等待 DeepSeek 推理內容逾時 (300s)")
+                    reasoning = ""
+
                 if not reasoning:
-                    logger.warning("未能获取到有效的推理内容，将使用默认提示继续")
-                    reasoning = "获取推理内容失败"
+                    logger.warning("未能取得有效的推理內容，將使用預設提示繼續")
+                    reasoning = "（無推理內容）"
 
-                # 构造 Claude 的输入消息
-                claude_messages = messages.copy()
-                combined_content = f"""
-                ******The above is user information*****
-The following is the reasoning process of another model:****\n{reasoning}\n\n ****
-Based on this reasoning, combined with your knowledge, when the current reasoning conflicts with your knowledge, you are more confident that you can adopt your own knowledge, which is completely acceptable. Please provide the user with a complete answer directly. You do not need to repeat the request or make your own reasoning. Please be sure to reply completely:"""
+                # FIX: Deep copy to avoid mutating original messages
+                claude_messages = copy.deepcopy(messages)
 
-                # 提取 system message 并同时过滤掉 system messages
+                # Extract system messages
                 system_content = ""
                 non_system_messages = []
                 for message in claude_messages:
@@ -136,24 +184,25 @@ Based on this reasoning, combined with your knowledge, when the current reasonin
                 claude_messages = non_system_messages
 
                 if not claude_messages:
-                    raise ValueError("消息列表为空，无法处理 Claude 请求")
+                    raise ValueError("訊息列表為空，無法處理 Claude 請求")
 
                 last_message = claude_messages[-1]
                 if last_message.get("role", "") != "user":
-                    raise ValueError("最后一个消息的角色不是用户，无法处理请求")
+                    raise ValueError("最後一則訊息的角色不是使用者，無法處理請求")
 
-                # 修改最后一个消息的内容
+                # Optimized bridge prompt (minimal token usage)
                 original_content = last_message["content"]
-                fixed_content = f"Here's my original input:\n{original_content}\n\n{combined_content}"
-                last_message["content"] = fixed_content
+                last_message["content"] = _build_bridge_content(
+                    original_content, reasoning, self.system_config
+                )
 
                 logger.info(
-                    f"开始处理 Claude 流，使用模型: {claude_model}, 提供商: {self.claude_client.provider}, tools={len(tools) if tools else 0}"
+                    f"開始處理 Claude 流，使用模型: {claude_model}, 提供商: {self.claude_client.provider}, tools={len(tools) if tools else 0}"
                 )
 
                 system_content = system_content.strip() if system_content else None
                 if system_content:
-                    logger.debug(f"使用系统提示: {system_content[:100]}...")
+                    logger.debug(f"使用系統提示: {system_content[:100]}...")
 
                 xml_filter = StreamXMLFilter()
 
@@ -166,10 +215,11 @@ Based on this reasoning, combined with your knowledge, when the current reasonin
                     tool_choice=tool_choice,
                 ):
                     if content_type == "answer":
-                        # Filter out XML tool call markup from Claude's output
                         filtered = xml_filter.process(content)
                         if not filtered:
                             continue
+                        if encoding:
+                            completion_token_count += len(encoding.encode(filtered))
                         response = {
                             "id": chat_id,
                             "object": "chat.completion.chunk",
@@ -185,9 +235,10 @@ Based on this reasoning, combined with your knowledge, when the current reasonin
                         )
 
                     elif content_type == "tool_calls_delta":
-                        # Flush any buffered text from XML filter before tool calls
                         flushed = xml_filter.flush()
                         if flushed:
+                            if encoding:
+                                completion_token_count += len(encoding.encode(flushed))
                             flush_resp = {
                                 "id": chat_id,
                                 "object": "chat.completion.chunk",
@@ -202,7 +253,6 @@ Based on this reasoning, combined with your knowledge, when the current reasonin
                                 f"data: {json.dumps(flush_resp)}\n\n".encode("utf-8")
                             )
 
-                        # Forward tool_calls delta in OpenAI format
                         response = {
                             "id": chat_id,
                             "object": "chat.completion.chunk",
@@ -218,9 +268,10 @@ Based on this reasoning, combined with your knowledge, when the current reasonin
                         )
 
                     elif content_type == "finish":
-                        # Flush remaining buffered text
                         flushed = xml_filter.flush()
                         if flushed:
+                            if encoding:
+                                completion_token_count += len(encoding.encode(flushed))
                             flush_resp = {
                                 "id": chat_id,
                                 "object": "chat.completion.chunk",
@@ -235,7 +286,6 @@ Based on this reasoning, combined with your knowledge, when the current reasonin
                                 f"data: {json.dumps(flush_resp)}\n\n".encode("utf-8")
                             )
 
-                        # Send finish reason
                         response = {
                             "id": chat_id,
                             "object": "chat.completion.chunk",
@@ -252,20 +302,20 @@ Based on this reasoning, combined with your knowledge, when the current reasonin
                         )
 
             except Exception as e:
-                logger.error(f"处理 Claude 流时发生错误: {e}")
+                logger.error(f"處理 Claude 流時發生錯誤: {e}")
                 error_response = _build_error_response(chat_id, created_time, claude_model, e)
                 await output_queue.put(f"data: {json.dumps(error_response)}\n\n".encode("utf-8"))
                 await output_queue.put(b"data: [DONE]\n\n")
                 await output_queue.put(None)
                 return
-            logger.info("Claude 任务处理完成，标记结束")
+            logger.info("Claude 任務處理完成，標記結束")
             await output_queue.put(None)
 
-        # 创建并发任务
+        # 建立並行任務
         asyncio.create_task(process_deepseek())
         asyncio.create_task(process_claude())
 
-        # 等待两个任务完成
+        # 等待兩個任務完成
         finished_tasks = 0
         while finished_tasks < 2:
             item = await output_queue.get()
@@ -273,6 +323,28 @@ Based on this reasoning, combined with your knowledge, when the current reasonin
                 finished_tasks += 1
             else:
                 yield item
+
+        # Streaming usage: send final usage chunk before [DONE] (OpenAI spec)
+        if include_usage and encoding:
+            # Estimate prompt tokens from messages
+            prompt_text = "\n".join(
+                msg.get("content", "") for msg in messages
+                if isinstance(msg.get("content", ""), str)
+            )
+            prompt_token_count = len(encoding.encode(prompt_text))
+            usage_chunk = {
+                "id": chat_id,
+                "object": "chat.completion.chunk",
+                "created": created_time,
+                "model": claude_model,
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": prompt_token_count,
+                    "completion_tokens": completion_token_count,
+                    "total_tokens": prompt_token_count + completion_token_count,
+                },
+            }
+            yield f"data: {json.dumps(usage_chunk)}\n\n".encode("utf-8")
 
         yield b"data: [DONE]\n\n"
 
@@ -285,12 +357,12 @@ Based on this reasoning, combined with your knowledge, when the current reasonin
         tools: Optional[List[Dict[str, Any]]] = None,
         tool_choice: Optional[Any] = None,
     ) -> dict:
-        """处理非流式输出过程"""
+        """處理非流式輸出過程"""
         chat_id = f"chatcmpl-{hex(int(time.time() * 1000))[2:]}"
         created_time = int(time.time())
         reasoning_content = []
 
-        # 1. 获取 DeepSeek 的推理内容（仍然使用流式）
+        # 1. 取得 DeepSeek 的推理內容（仍然使用流式）
         try:
             async for content_type, content in self.deepseek_client.stream_chat(
                 messages, deepseek_model, self.is_origin_reasoning
@@ -300,19 +372,14 @@ Based on this reasoning, combined with your knowledge, when the current reasonin
                 elif content_type == "content":
                     break
         except Exception as e:
-            logger.error(f"获取 DeepSeek 推理内容时发生错误: {e}")
-            reasoning_content = ["获取推理内容失败"]
+            logger.error(f"取得 DeepSeek 推理內容時發生錯誤: {e}")
+            reasoning_content = ["（取得推理內容失敗）"]
 
-        # 2. 构造 Claude 的输入消息
+        # 2. 構造 Claude 的輸入訊息 (FIX: deep copy)
         reasoning = "".join(reasoning_content)
-        claude_messages = messages.copy()
+        claude_messages = copy.deepcopy(messages)
 
-        combined_content = f"""
-            ******The above is user information*****
-The following is the reasoning process of another model:****\n{reasoning}\n\n ****
-Based on this reasoning, combined with your knowledge, when the current reasoning conflicts with your knowledge, you are more confident that you can adopt your own knowledge, which is completely acceptable. Please provide the user with a complete answer directly. You do not need to repeat the request or make your own reasoning. Please be sure to reply completely:"""
-
-        # 提取 system message 并同时从原始 messages 中过滤掉 system messages
+        # Extract system messages
         system_content = ""
         non_system_messages = []
         for message in claude_messages:
@@ -326,21 +393,23 @@ Based on this reasoning, combined with your knowledge, when the current reasonin
         last_message = claude_messages[-1]
         if last_message.get("role", "") == "user":
             original_content = last_message["content"]
-            fixed_content = (
-                f"Here's my original input:\n{original_content}\n\n{combined_content}"
+            last_message["content"] = _build_bridge_content(
+                original_content, reasoning, self.system_config
             )
-            last_message["content"] = fixed_content
 
-        # 拼接所有 content 为一个字符串，计算 token
+        # Count input tokens
         token_content = "\n".join(
             [message.get("content", "") for message in claude_messages
              if isinstance(message.get("content", ""), str)]
         )
-        encoding = tiktoken.encoding_for_model("gpt-4o")
+        try:
+            encoding = tiktoken.encoding_for_model("gpt-4o")
+        except Exception:
+            encoding = tiktoken.get_encoding("cl100k_base")
         input_tokens = encoding.encode(token_content)
-        logger.debug(f"输入 Tokens: {len(input_tokens)}")
+        logger.debug(f"輸入 Tokens: {len(input_tokens)}")
 
-        # 3. 获取 Claude 的响应
+        # 3. 取得 Claude 的回應
         try:
             answer = ""
             tool_calls_list = []
@@ -349,7 +418,7 @@ Based on this reasoning, combined with your knowledge, when the current reasonin
 
             system_content = system_content.strip() if system_content else None
             if system_content:
-                logger.debug(f"使用系统提示: {system_content[:100]}...")
+                logger.debug(f"使用系統提示: {system_content[:100]}...")
 
             xml_filter = StreamXMLFilter()
             async for content_type, content in self.claude_client.stream_chat(
@@ -369,14 +438,14 @@ Based on this reasoning, combined with your knowledge, when the current reasonin
                     tool_calls_list = content
                 elif content_type == "finish":
                     finish_reason = content
-                logger.debug(f"输出 Tokens: {len(output_tokens)}")
+                logger.debug(f"輸出 Tokens: {len(output_tokens)}")
 
             # Flush remaining XML filter buffer
             flushed = xml_filter.flush()
             if flushed:
                 answer += flushed
 
-            # 4. 构造 OpenAI 格式的响应
+            # 4. 構造 OpenAI 格式的回應
             response_message = {
                 "role": "assistant",
                 "content": answer if answer else None,
@@ -402,7 +471,7 @@ Based on this reasoning, combined with your knowledge, when the current reasonin
                 },
             }
         except Exception as e:
-            logger.error(f"获取 Claude 响应时发生错误: {e}")
+            logger.error(f"取得 Claude 回應時發生錯誤: {e}")
             raise e
 
 
@@ -415,11 +484,11 @@ def _build_error_response(chat_id: str, created_time: int, model: str, error: Ex
         "code": "invalid_request_error",
     }
     if "Input length" in error_message:
-        error_info["message"] = "输入的上下文内容过长，超过了模型的最大处理长度限制。请减少输入内容或分段处理。"
+        error_info["message"] = "輸入的上下文內容過長，超過了模型的最大處理長度限制。請減少輸入內容或分段處理。"
     elif "InvalidParameter" in error_message:
-        error_info["message"] = "请求参数无效，请检查输入内容。"
+        error_info["message"] = "請求參數無效，請檢查輸入內容。"
     elif "BadRequest" in error_message:
-        error_info["message"] = "请求格式错误，请检查输入内容。"
+        error_info["message"] = "請求格式錯誤，請檢查輸入內容。"
 
     return {
         "id": chat_id,

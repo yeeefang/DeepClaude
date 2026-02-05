@@ -72,7 +72,8 @@ class ClaudeClient(BaseClient):
             yield item
 
     async def _stream_openrouter(self, messages, model_arg, model, stream, system_prompt, tools, tool_choice):
-        model = "anthropic/claude-3.5-sonnet"
+        # FIX: Don't hardcode model - use the model parameter passed in
+        # Original bug: model = "anthropic/claude-3.5-sonnet" always overrode user's model selection
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
