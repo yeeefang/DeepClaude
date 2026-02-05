@@ -2,7 +2,8 @@
 
 import asyncio
 import json
-from typing import AsyncGenerator, Optional, Dict, Any, List
+import copy
+from typing import AsyncGenerator, Optional, Dict, Any, List, Union
 
 from google import genai
 from google.genai import types
@@ -44,9 +45,41 @@ class GeminiClient(BaseClient):
                 f"請通過環境變量設置: HTTP_PROXY={proxy} HTTPS_PROXY={proxy}"
             )
 
+    def _extract_text_from_content(self, content: Union[str, List, Dict]) -> str:
+        """從各種格式的 content 中提取文本
+
+        Args:
+            content: 可能是 string, list, 或 dict
+
+        Returns:
+            提取的文本字符串
+        """
+        if isinstance(content, str):
+            return content
+
+        if isinstance(content, list):
+            # Roo Code 格式: [{'type': 'text', 'text': '...'}, ...]
+            texts = []
+            for item in content:
+                if isinstance(item, dict):
+                    if item.get("type") == "text" and "text" in item:
+                        texts.append(item["text"])
+                    elif "text" in item:
+                        texts.append(item["text"])
+                elif isinstance(item, str):
+                    texts.append(item)
+            return "\n\n".join(texts) if texts else ""
+
+        if isinstance(content, dict):
+            # 如果是 dict，嘗試提取 text 欄位
+            return content.get("text", str(content))
+
+        # 其他情況，轉換為字符串
+        return str(content)
+
     def _convert_openai_to_gemini(
         self,
-        messages: List[Dict[str, str]]
+        messages: List[Dict[str, Any]]
     ) -> tuple[Optional[str], List[types.Content]]:
         """轉換 OpenAI 格式訊息到 Gemini SDK 格式
 
@@ -65,25 +98,86 @@ class GeminiClient(BaseClient):
             role = msg.get("role", "user")
             content = msg.get("content", "")
 
+            # 提取文本內容
+            text_content = self._extract_text_from_content(content)
+
+            if not text_content:
+                logger.warning(f"跳過空內容訊息: {role}")
+                continue
+
             if role == "system":
                 # 系統訊息作為 system_instruction
-                system_instruction = content
+                system_instruction = text_content
             elif role == "user":
                 contents.append(
                     types.Content(
                         role="user",
-                        parts=[types.Part(text=content)]
+                        parts=[types.Part(text=text_content)]
                     )
                 )
             elif role == "assistant":
                 contents.append(
                     types.Content(
                         role="model",
-                        parts=[types.Part(text=content)]
+                        parts=[types.Part(text=text_content)]
                     )
                 )
 
         return system_instruction, contents
+
+    def _clean_json_schema_for_gemini(self, schema: Dict[str, Any]) -> Dict[str, Any]:
+        """清理 JSON Schema 以符合 Gemini 要求
+
+        Gemini 不支援某些 JSON Schema 欄位，需要移除：
+        - additionalProperties
+        - default
+        - examples
+        - $schema
+        - $id
+
+        Args:
+            schema: OpenAI JSON Schema
+
+        Returns:
+            清理後的 schema
+        """
+        if not isinstance(schema, dict):
+            return schema
+
+        # 深拷貝以避免修改原始數據
+        cleaned = copy.deepcopy(schema)
+
+        # 移除不支援的頂層欄位
+        unsupported_fields = [
+            "additionalProperties",
+            "default",
+            "examples",
+            "$schema",
+            "$id",
+        ]
+
+        for field in unsupported_fields:
+            cleaned.pop(field, None)
+
+        # 遞迴清理 properties
+        if "properties" in cleaned and isinstance(cleaned["properties"], dict):
+            for prop_name, prop_value in cleaned["properties"].items():
+                if isinstance(prop_value, dict):
+                    cleaned["properties"][prop_name] = self._clean_json_schema_for_gemini(prop_value)
+
+        # 遞迴清理 items (array type)
+        if "items" in cleaned and isinstance(cleaned["items"], dict):
+            cleaned["items"] = self._clean_json_schema_for_gemini(cleaned["items"])
+
+        # 遞迴清理 anyOf, oneOf, allOf
+        for keyword in ["anyOf", "oneOf", "allOf"]:
+            if keyword in cleaned and isinstance(cleaned[keyword], list):
+                cleaned[keyword] = [
+                    self._clean_json_schema_for_gemini(item) if isinstance(item, dict) else item
+                    for item in cleaned[keyword]
+                ]
+
+        return cleaned
 
     def _convert_openai_tools_to_gemini(
         self,
@@ -117,17 +211,22 @@ class GeminiClient(BaseClient):
                 continue
 
             try:
+                # 清理參數 schema
+                cleaned_parameters = self._clean_json_schema_for_gemini(parameters)
+
                 # 創建 Gemini FunctionDeclaration
                 func_decl = types.FunctionDeclaration(
                     name=name,
                     description=description,
-                    parameters=parameters
+                    parameters=cleaned_parameters
                 )
                 function_declarations.append(func_decl)
                 logger.debug(f"轉換工具: {name}")
 
             except Exception as e:
                 logger.error(f"轉換工具 {name} 失敗: {e}")
+                logger.debug(f"原始參數: {parameters}")
+                logger.debug(f"清理後參數: {cleaned_parameters if 'cleaned_parameters' in locals() else 'N/A'}")
                 continue
 
         if not function_declarations:
@@ -138,7 +237,7 @@ class GeminiClient(BaseClient):
 
     async def stream_chat(
         self,
-        messages: List[Dict[str, str]],
+        messages: List[Dict[str, Any]],
         model_arg: tuple[float, float, float, float],
         model: str,
         tools: Optional[List[Dict[str, Any]]] = None,
@@ -170,6 +269,8 @@ class GeminiClient(BaseClient):
                 gemini_tools = self._convert_openai_tools_to_gemini(tools)
                 if gemini_tools:
                     logger.info(f"已轉換 {len(tools)} 個工具到 Gemini 格式")
+                else:
+                    logger.warning("工具轉換結果為空")
             except Exception as e:
                 logger.error(f"工具轉換失敗: {e}，將不使用工具")
                 gemini_tools = None
