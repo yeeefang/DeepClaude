@@ -189,6 +189,10 @@ class GeminiClient(BaseClient):
                                     finish_reason = "length"
                                 elif candidate_finish == "MALFORMED_FUNCTION_CALL":
                                     logger.warning(f"Gemini 函數調用格式錯誤: {data['candidates'][0].get('finishMessage', '')}")
+                                    # 如果沒有內容則返回錯誤提示
+                                    error_msg = data['candidates'][0].get('finishMessage', 'Unknown error')
+                                    logger.warning(f"Gemini 未返回任何內容，將返回錯誤提示: {error_msg[:100]}")
+                                    yield ("assistant", f"⚠️ 模型嘗試調用工具但格式錯誤，請重試或使用不同的模型。詳情: {error_msg[:200]}")
                                     finish_reason = "stop"
 
                         yield ("finish", finish_reason)
