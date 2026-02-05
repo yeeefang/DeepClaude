@@ -189,6 +189,28 @@ class GeminiComposite:
                         await output_queue.put(
                             f"data: {json.dumps(response)}\n\n".encode("utf-8")
                         )
+                    elif content_type == "tool_call":
+                        # 處理工具調用
+                        try:
+                            tool_call_data = json.loads(content)
+                            response = {
+                                "id": chat_id,
+                                "object": "chat.completion.chunk",
+                                "created": created_time,
+                                "model": target_model,
+                                "choices": [{
+                                    "index": 0,
+                                    "delta": {
+                                        "role": "assistant",
+                                        "tool_calls": [tool_call_data]
+                                    },
+                                }],
+                            }
+                            await output_queue.put(
+                                f"data: {json.dumps(response)}\n\n".encode("utf-8")
+                            )
+                        except json.JSONDecodeError as e:
+                            logger.error(f"無法解析工具調用: {e}")
                     elif content_type == "finish":
                         finish_chunk = {
                             "id": chat_id,
