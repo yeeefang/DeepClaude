@@ -3,7 +3,7 @@
 import asyncio
 import json
 import time
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Optional, List, Dict, Any
 
 import tiktoken
 
@@ -27,23 +27,11 @@ class DeepClaude:
         target_proxy: str = None,
         system_config: dict = None
     ):
-        """初始化 API 客户端
-
-        Args:
-            deepseek_api_key: DeepSeek API密钥
-            claude_api_key: Claude API密钥
-            deepseek_api_url: DeepSeek API地址
-            claude_api_url: Claude API地址
-            claude_provider: Claude 提供商
-            is_origin_reasoning: 是否使用原始推理
-            reasoner_proxy: reasoner模型代理服务器地址
-            target_proxy: target模型代理服务器地址
-            system_config: 系统配置，包含 save_deepseek_tokens 等设置
-        """
+        """初始化 API 客户端"""
         self.system_config = system_config or {}
         self.deepseek_client = DeepSeekClient(
-            deepseek_api_key, 
-            deepseek_api_url, 
+            deepseek_api_key,
+            deepseek_api_url,
             proxy=reasoner_proxy,
             system_config=self.system_config
         )
@@ -58,6 +46,8 @@ class DeepClaude:
         model_arg: tuple[float, float, float, float],
         deepseek_model: str = "deepseek-reasoner",
         claude_model: str = "claude-3-5-sonnet-20241022",
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: Optional[Any] = None,
     ) -> AsyncGenerator[bytes, None]:
         """处理完整的流式输出过程
 
@@ -66,34 +56,13 @@ class DeepClaude:
             model_arg: 模型参数
             deepseek_model: DeepSeek 模型名称
             claude_model: Claude 模型名称
-
-        Yields:
-            字节流数据，格式如下：
-            {
-                "id": "chatcmpl-xxx",
-                "object": "chat.completion.chunk",
-                "created": timestamp,
-                "model": model_name,
-                "choices": [{
-                    "index": 0,
-                    "delta": {
-                        "role": "assistant",
-                        "reasoning_content": reasoning_content,
-                        "content": content
-                    }
-                }]
-            }
+            tools: OpenAI格式的工具定义列表
+            tool_choice: 工具选择策略
         """
-        # 生成唯一的会话ID和时间戳
         chat_id = f"chatcmpl-{hex(int(time.time() * 1000))[2:]}"
         created_time = int(time.time())
-
-        # 创建队列，用于收集输出数据
         output_queue = asyncio.Queue()
-        # 队列，用于传递 DeepSeek 推理内容给 Claude
         claude_queue = asyncio.Queue()
-
-        # 用于存储 DeepSeek 的推理累积内容
         reasoning_content = []
 
         async def process_deepseek():
@@ -109,22 +78,19 @@ class DeepClaude:
                             "object": "chat.completion.chunk",
                             "created": created_time,
                             "model": deepseek_model,
-                            "choices": [
-                                {
-                                    "index": 0,
-                                    "delta": {
-                                        "role": "assistant",
-                                        "reasoning_content": content,
-                                        "content": "",
-                                    },
-                                }
-                            ],
+                            "choices": [{
+                                "index": 0,
+                                "delta": {
+                                    "role": "assistant",
+                                    "reasoning_content": content,
+                                    "content": "",
+                                },
+                            }],
                         }
                         await output_queue.put(
                             f"data: {json.dumps(response)}\n\n".encode("utf-8")
                         )
                     elif content_type == "content":
-                        # 当收到 content 类型时，将完整的推理内容发送到 claude_queue，并结束 DeepSeek 流处理
                         logger.info(
                             f"DeepSeek 推理完成，收集到的推理内容长度：{len(''.join(reasoning_content))}"
                         )
@@ -132,44 +98,11 @@ class DeepClaude:
                         break
             except Exception as e:
                 logger.error(f"处理 DeepSeek 流时发生错误: {e}")
-                # 构造错误响应
-                error_message = str(e)
-                error_info = {
-                    "message": error_message,
-                    "type": "api_error",
-                    "code": "invalid_request_error"
-                }
-                
-                # 处理常见的错误信息
-                if "Input length" in error_message:
-                    error_info["message"] = "输入的上下文内容过长，超过了模型的最大处理长度限制。请减少输入内容或分段处理。"
-                    error_info["message_zh"] = "输入的上下文内容过长，超过了模型的最大处理长度限制。请减少输入内容或分段处理。"
-                    error_info["message_en"] = error_message
-                elif "InvalidParameter" in error_message:
-                    error_info["message"] = "请求参数无效，请检查输入内容。"
-                    error_info["message_zh"] = "请求参数无效，请检查输入内容。"
-                    error_info["message_en"] = error_message
-                elif "BadRequest" in error_message:
-                    error_info["message"] = "请求格式错误，请检查输入内容。"
-                    error_info["message_zh"] = "请求格式错误，请检查输入内容。"
-                    error_info["message_en"] = error_message
-
-                error_response = {
-                    "id": chat_id,
-                    "object": "chat.completion.chunk",
-                    "created": created_time,
-                    "model": deepseek_model,
-                    "error": error_info
-                }
-                await output_queue.put(
-                    f"data: {json.dumps(error_response)}\n\n".encode("utf-8")
-                )
-                # 发送结束标记
+                error_response = _build_error_response(chat_id, created_time, deepseek_model, e)
+                await output_queue.put(f"data: {json.dumps(error_response)}\n\n".encode("utf-8"))
                 await output_queue.put(b"data: [DONE]\n\n")
-                # 标记任务结束
                 await output_queue.put(None)
                 return
-            # 用 None 标记 DeepSeek 任务结束
             logger.info("DeepSeek 任务处理完成，标记结束")
             await output_queue.put(None)
 
@@ -199,15 +132,12 @@ Based on this reasoning, combined with your knowledge, when the current reasonin
                         system_content += message.get("content", "") + "\n"
                     else:
                         non_system_messages.append(message)
-                
-                # 更新消息列表为不包含 system 消息的列表
+
                 claude_messages = non_system_messages
 
-                # 检查过滤后的消息列表是否为空
                 if not claude_messages:
                     raise ValueError("消息列表为空，无法处理 Claude 请求")
 
-                # 获取最后一个消息并检查其角色
                 last_message = claude_messages[-1]
                 if last_message.get("role", "") != "user":
                     raise ValueError("最后一个消息的角色不是用户，无法处理请求")
@@ -218,20 +148,22 @@ Based on this reasoning, combined with your knowledge, when the current reasonin
                 last_message["content"] = fixed_content
 
                 logger.info(
-                    f"开始处理 Claude 流，使用模型: {claude_model}, 提供商: {self.claude_client.provider}"
+                    f"开始处理 Claude 流，使用模型: {claude_model}, 提供商: {self.claude_client.provider}, tools={len(tools) if tools else 0}"
                 )
 
-                # 检查 system_prompt
                 system_content = system_content.strip() if system_content else None
                 if system_content:
                     logger.debug(f"使用系统提示: {system_content[:100]}...")
 
                 xml_filter = StreamXMLFilter()
+
                 async for content_type, content in self.claude_client.stream_chat(
                     messages=claude_messages,
                     model_arg=model_arg,
                     model=claude_model,
-                    system_prompt=system_content
+                    system_prompt=system_content,
+                    tools=tools,
+                    tool_choice=tool_choice,
                 ):
                     if content_type == "answer":
                         # Filter out XML tool call markup from Claude's output
@@ -243,56 +175,89 @@ Based on this reasoning, combined with your knowledge, when the current reasonin
                             "object": "chat.completion.chunk",
                             "created": created_time,
                             "model": claude_model,
-                            "choices": [
-                                {
-                                    "index": 0,
-                                    "delta": {"role": "assistant", "content": filtered},
-                                }
-                            ],
+                            "choices": [{
+                                "index": 0,
+                                "delta": {"role": "assistant", "content": filtered},
+                            }],
                         }
                         await output_queue.put(
                             f"data: {json.dumps(response)}\n\n".encode("utf-8")
                         )
+
+                    elif content_type == "tool_calls_delta":
+                        # Flush any buffered text from XML filter before tool calls
+                        flushed = xml_filter.flush()
+                        if flushed:
+                            flush_resp = {
+                                "id": chat_id,
+                                "object": "chat.completion.chunk",
+                                "created": created_time,
+                                "model": claude_model,
+                                "choices": [{
+                                    "index": 0,
+                                    "delta": {"role": "assistant", "content": flushed},
+                                }],
+                            }
+                            await output_queue.put(
+                                f"data: {json.dumps(flush_resp)}\n\n".encode("utf-8")
+                            )
+
+                        # Forward tool_calls delta in OpenAI format
+                        response = {
+                            "id": chat_id,
+                            "object": "chat.completion.chunk",
+                            "created": created_time,
+                            "model": claude_model,
+                            "choices": [{
+                                "index": 0,
+                                "delta": {"tool_calls": content},
+                            }],
+                        }
+                        await output_queue.put(
+                            f"data: {json.dumps(response)}\n\n".encode("utf-8")
+                        )
+
+                    elif content_type == "finish":
+                        # Flush remaining buffered text
+                        flushed = xml_filter.flush()
+                        if flushed:
+                            flush_resp = {
+                                "id": chat_id,
+                                "object": "chat.completion.chunk",
+                                "created": created_time,
+                                "model": claude_model,
+                                "choices": [{
+                                    "index": 0,
+                                    "delta": {"role": "assistant", "content": flushed},
+                                }],
+                            }
+                            await output_queue.put(
+                                f"data: {json.dumps(flush_resp)}\n\n".encode("utf-8")
+                            )
+
+                        # Send finish reason
+                        response = {
+                            "id": chat_id,
+                            "object": "chat.completion.chunk",
+                            "created": created_time,
+                            "model": claude_model,
+                            "choices": [{
+                                "index": 0,
+                                "delta": {},
+                                "finish_reason": content,
+                            }],
+                        }
+                        await output_queue.put(
+                            f"data: {json.dumps(response)}\n\n".encode("utf-8")
+                        )
+
             except Exception as e:
                 logger.error(f"处理 Claude 流时发生错误: {e}")
-                # 构造错误响应
-                error_message = str(e)
-                error_info = {
-                    "message": error_message,
-                    "type": "api_error",
-                    "code": "invalid_request_error"
-                }
-                
-                # 处理常见的错误信息
-                if "Input length" in error_message:
-                    error_info["message"] = "输入的上下文内容过长，超过了模型的最大处理长度限制。请减少输入内容或分段处理。"
-                    error_info["message_zh"] = "输入的上下文内容过长，超过了模型的最大处理长度限制。请减少输入内容或分段处理。"
-                    error_info["message_en"] = error_message
-                elif "InvalidParameter" in error_message:
-                    error_info["message"] = "请求参数无效，请检查输入内容。"
-                    error_info["message_zh"] = "请求参数无效，请检查输入内容。"
-                    error_info["message_en"] = error_message
-                elif "BadRequest" in error_message:
-                    error_info["message"] = "请求格式错误，请检查输入内容。"
-                    error_info["message_zh"] = "请求格式错误，请检查输入内容。"
-                    error_info["message_en"] = error_message
-
-                error_response = {
-                    "id": chat_id,
-                    "object": "chat.completion.chunk",
-                    "created": created_time,
-                    "model": claude_model,
-                    "error": error_info
-                }
-                await output_queue.put(
-                    f"data: {json.dumps(error_response)}\n\n".encode("utf-8")
-                )
-                # 发送结束标记
+                error_response = _build_error_response(chat_id, created_time, claude_model, e)
+                await output_queue.put(f"data: {json.dumps(error_response)}\n\n".encode("utf-8"))
                 await output_queue.put(b"data: [DONE]\n\n")
-                # 标记任务结束
                 await output_queue.put(None)
                 return
-            # 用 None 标记 Claude 任务结束
             logger.info("Claude 任务处理完成，标记结束")
             await output_queue.put(None)
 
@@ -300,7 +265,7 @@ Based on this reasoning, combined with your knowledge, when the current reasonin
         asyncio.create_task(process_deepseek())
         asyncio.create_task(process_claude())
 
-        # 等待两个任务完成，通过计数判断
+        # 等待两个任务完成
         finished_tasks = 0
         while finished_tasks < 2:
             item = await output_queue.get()
@@ -309,7 +274,6 @@ Based on this reasoning, combined with your knowledge, when the current reasonin
             else:
                 yield item
 
-        # 发送结束标记
         yield b"data: [DONE]\n\n"
 
     async def chat_completions_without_stream(
@@ -318,18 +282,10 @@ Based on this reasoning, combined with your knowledge, when the current reasonin
         model_arg: tuple[float, float, float, float],
         deepseek_model: str = "deepseek-reasoner",
         claude_model: str = "claude-3-5-sonnet-20241022",
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: Optional[Any] = None,
     ) -> dict:
-        """处理非流式输出过程
-
-        Args:
-            messages: 初始消息列表
-            model_arg: 模型参数
-            deepseek_model: DeepSeek 模型名称
-            claude_model: Claude 模型名称
-
-        Returns:
-            dict: OpenAI 格式的完整响应
-        """
+        """处理非流式输出过程"""
         chat_id = f"chatcmpl-{hex(int(time.time() * 1000))[2:]}"
         created_time = int(time.time())
         reasoning_content = []
@@ -364,11 +320,9 @@ Based on this reasoning, combined with your knowledge, when the current reasonin
                 system_content += message.get("content", "") + "\n"
             else:
                 non_system_messages.append(message)
-        
-        # 更新消息列表为不包含 system 消息的列表
+
         claude_messages = non_system_messages
 
-        # 获取最后一个消息并检查其角色
         last_message = claude_messages[-1]
         if last_message.get("role", "") == "user":
             original_content = last_message["content"]
@@ -379,61 +333,98 @@ Based on this reasoning, combined with your knowledge, when the current reasonin
 
         # 拼接所有 content 为一个字符串，计算 token
         token_content = "\n".join(
-            [message.get("content", "") for message in claude_messages]
+            [message.get("content", "") for message in claude_messages
+             if isinstance(message.get("content", ""), str)]
         )
         encoding = tiktoken.encoding_for_model("gpt-4o")
         input_tokens = encoding.encode(token_content)
         logger.debug(f"输入 Tokens: {len(input_tokens)}")
 
-        logger.debug("claude messages: " + str(claude_messages))
-        # 3. 获取 Claude 的非流式响应
+        # 3. 获取 Claude 的响应
         try:
             answer = ""
-            output_tokens = []  # 初始化 output_tokens
-            
-            # 检查 system_prompt
+            tool_calls_list = []
+            finish_reason = "stop"
+            output_tokens = []
+
             system_content = system_content.strip() if system_content else None
             if system_content:
                 logger.debug(f"使用系统提示: {system_content[:100]}...")
-            
+
             xml_filter = StreamXMLFilter()
             async for content_type, content in self.claude_client.stream_chat(
                 messages=claude_messages,
                 model_arg=model_arg,
                 model=claude_model,
                 stream=False,
-                system_prompt=system_content
+                system_prompt=system_content,
+                tools=tools,
+                tool_choice=tool_choice,
             ):
                 if content_type == "answer":
                     filtered = xml_filter.process(content)
                     answer += filtered
-                    output_tokens = encoding.encode(answer)  # 更新 output_tokens
+                    output_tokens = encoding.encode(answer)
+                elif content_type == "tool_calls_complete":
+                    tool_calls_list = content
+                elif content_type == "finish":
+                    finish_reason = content
                 logger.debug(f"输出 Tokens: {len(output_tokens)}")
 
+            # Flush remaining XML filter buffer
+            flushed = xml_filter.flush()
+            if flushed:
+                answer += flushed
+
             # 4. 构造 OpenAI 格式的响应
+            response_message = {
+                "role": "assistant",
+                "content": answer if answer else None,
+                "reasoning_content": reasoning,
+            }
+            if tool_calls_list:
+                response_message["tool_calls"] = tool_calls_list
+
             return {
                 "id": chat_id,
                 "object": "chat.completion",
                 "created": created_time,
                 "model": claude_model,
-                "choices": [
-                    {
-                        "index": 0,
-                        "message": {
-                            "role": "assistant",
-                            "content": answer,
-                            "reasoning_content": reasoning,
-                        },
-                        "finish_reason": "stop",
-                    }
-                ],
+                "choices": [{
+                    "index": 0,
+                    "message": response_message,
+                    "finish_reason": finish_reason,
+                }],
                 "usage": {
                     "prompt_tokens": len(input_tokens),
                     "completion_tokens": len(output_tokens),
-                    "total_tokens": len(input_tokens + output_tokens),
+                    "total_tokens": len(input_tokens) + len(output_tokens),
                 },
             }
         except Exception as e:
             logger.error(f"获取 Claude 响应时发生错误: {e}")
-            # 直接抛出异常，不再继续处理
             raise e
+
+
+def _build_error_response(chat_id: str, created_time: int, model: str, error: Exception) -> dict:
+    """Build a standardized error response."""
+    error_message = str(error)
+    error_info = {
+        "message": error_message,
+        "type": "api_error",
+        "code": "invalid_request_error",
+    }
+    if "Input length" in error_message:
+        error_info["message"] = "输入的上下文内容过长，超过了模型的最大处理长度限制。请减少输入内容或分段处理。"
+    elif "InvalidParameter" in error_message:
+        error_info["message"] = "请求参数无效，请检查输入内容。"
+    elif "BadRequest" in error_message:
+        error_info["message"] = "请求格式错误，请检查输入内容。"
+
+    return {
+        "id": chat_id,
+        "object": "chat.completion.chunk",
+        "created": created_time,
+        "model": model,
+        "error": error_info,
+    }

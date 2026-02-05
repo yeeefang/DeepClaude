@@ -12,19 +12,9 @@ from app.utils.logger import logger
 
 class OpenAICompatibleClient(BaseClient):
     """OpenAI 兼容格式的客户端类
-    
+
     用于处理符合 OpenAI API 格式的服务,如 Gemini 等
     """
-
-    # # 模型特定配置
-    # MODEL_CONFIGS = {
-    #     "gemini-2.5-flash-preview-04-17": {
-    #         "enable_thinking": {
-    #             "include_thoughts": True,
-    #             "thinking_budget": 0
-    #         }
-    #     }
-    # }
 
     def __init__(
         self,
@@ -44,25 +34,14 @@ class OpenAICompatibleClient(BaseClient):
         super().__init__(api_key, api_url, timeout, proxy=proxy)
 
     def _get_headers(self) -> Dict[str, str]:
-        """获取请求头
-
-        Returns:
-            Dict[str, str]: 请求头字典
-        """
+        """获取请求头"""
         return {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.api_key}",
         }
 
     def _prepare_messages(self, messages: List[Dict[str, str]]) -> List[Dict[str, str]]:
-        """处理消息格式
-
-        Args:
-            messages: 原始消息列表
-
-        Returns:
-            List[Dict[str, str]]: 处理后的消息列表
-        """
+        """处理消息格式"""
         return messages
 
     async def chat(
@@ -76,9 +55,6 @@ class OpenAICompatibleClient(BaseClient):
 
         Returns:
             Dict[str, Any]: OpenAI 格式的完整响应
-
-        Raises:
-            ClientError: 请求错误
         """
         headers = self._get_headers()
         processed_messages = self._prepare_messages(messages)
@@ -89,15 +65,11 @@ class OpenAICompatibleClient(BaseClient):
             "stream": False,
         }
 
-        # 使用模型配置
-        if model in self.MODEL_CONFIGS:
-            data.update(self.MODEL_CONFIGS[model])
-
         try:
             response_chunks = []
             async for chunk in self._make_request(headers, data):
                 response_chunks.append(chunk)
-            
+
             response_text = b"".join(response_chunks).decode("utf-8")
             return json.loads(response_text)
 
@@ -107,19 +79,26 @@ class OpenAICompatibleClient(BaseClient):
             raise ClientError(error_msg)
 
     async def stream_chat(
-        self, messages: List[Dict[str, str]], model: str
-    ) -> AsyncGenerator[tuple[str, str], None]:
+        self,
+        messages: List[Dict[str, str]],
+        model: str,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: Optional[Any] = None,
+    ) -> AsyncGenerator[tuple[str, Any], None]:
         """流式对话
 
         Args:
             messages: 消息列表
             model: 模型名称
+            tools: OpenAI格式的工具定义列表
+            tool_choice: 工具选择策略
 
         Yields:
-            tuple[str, str]: (role, content) 消息元组
-
-        Raises:
-            ClientError: 请求错误
+            tuple[str, Any]: (content_type, content)
+                "assistant"/role -> str: 文本内容
+                "tool_calls_delta" -> list: tool_calls delta
+                "finish" -> str: 完成原因
+                Or legacy format: "assistant" -> {"finish_reason": "stop"}
         """
         headers = self._get_headers()
         processed_messages = self._prepare_messages(messages)
@@ -129,56 +108,57 @@ class OpenAICompatibleClient(BaseClient):
             "messages": processed_messages,
             "stream": True,
         }
-
-        # # 使用模型配置
-        # if model in self.MODEL_CONFIGS:
-        #     data.update(self.MODEL_CONFIGS[model])
+        if tools:
+            data["tools"] = tools
+            logger.debug(f"OpenAI compatible client: forwarding {len(tools)} tools")
+        if tool_choice is not None:
+            data["tool_choice"] = tool_choice
 
         buffer = ""
         try:
             async for chunk in self._make_request(headers, data):
                 buffer += chunk.decode("utf-8")
-                
-                # 处理 buffer 中的数据行
+
                 while "\n" in buffer:
                     line, buffer = buffer.split("\n", 1)
                     line = line.strip()
-                    
-                    # 跳过空行和 data: [DONE] 行
+
                     if not line or line == "data: [DONE]":
                         continue
-                    
-                    # 解析 SSE 数据
+
                     if line.startswith("data: "):
                         json_str = line[6:].strip()
                         try:
                             response = json.loads(json_str)
-                            logger.debug(f"收到响应数据: {json.dumps(response, ensure_ascii=False)}")
-                            
-                            if (
-                                "choices" in response
-                                and len(response["choices"]) > 0
-                            ):
+                            logger.debug(f"收到响应数据: {json.dumps(response, ensure_ascii=False)[:200]}")
+
+                            if "choices" in response and len(response["choices"]) > 0:
                                 choice = response["choices"][0]
-                                
-                                # 先处理可能的内容，再检查结束标记
-                                if "delta" in choice and "content" in choice["delta"]:
-                                    content = choice["delta"]["content"]
-                                    if content:  # 只输出非空内容
-                                        logger.debug(f"收到内容: {content}")
-                                        yield "assistant", content
-                                
-                                # 检查是否是结束标记
-                                if "finish_reason" in choice and choice["finish_reason"] == "stop":
-                                    logger.debug("检测到结束标记: finish_reason=stop")
+                                delta = choice.get("delta", {})
+
+                                # Text content
+                                if "content" in delta and delta["content"]:
+                                    yield "assistant", delta["content"]
+
+                                # Tool calls
+                                tool_calls = delta.get("tool_calls")
+                                if tool_calls:
+                                    yield "tool_calls_delta", tool_calls
+
+                                # Finish reason
+                                finish_reason = choice.get("finish_reason")
+                                if finish_reason == "stop":
                                     yield "assistant", {"finish_reason": "stop"}
-                                    return
-                                
-                                # 记录其他类型的响应
-                                if "delta" not in choice or "content" not in choice["delta"]:
-                                    logger.debug(f"收到不包含内容的响应: {json.dumps(choice, ensure_ascii=False)}")
+                                elif finish_reason == "tool_calls":
+                                    yield "finish", "tool_calls"
+                                elif finish_reason:
+                                    yield "finish", finish_reason
+
+                                if "delta" not in choice or (not delta.get("content") and not delta.get("tool_calls")):
+                                    if not finish_reason:
+                                        logger.debug(f"收到不包含内容的响应: {json.dumps(choice, ensure_ascii=False)[:200]}")
                         except json.JSONDecodeError as e:
-                            logger.error(f"JSON解析错误: {str(e)}, 原始数据: {json_str}")
+                            logger.error(f"JSON解析错误: {str(e)}, 原始数据: {json_str[:200]}")
                             continue
 
         except Exception as e:

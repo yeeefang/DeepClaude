@@ -165,15 +165,19 @@ class ModelManager:
         self.model_instances[model_name] = instance
         return instance
 
-    def validate_and_prepare_params(self, body: Dict[str, Any]) -> Tuple[List[Dict[str, str]], str, Tuple[float, float, float, float, bool]]:
+    def validate_and_prepare_params(self, body: Dict[str, Any]) -> Tuple[List[Dict[str, str]], str, Tuple[float, float, float, float, bool], Optional[List[Dict[str, Any]]], Optional[Any]]:
         """验证和准备请求参数
 
         Args:
             body: 请求体
 
         Returns:
-            Tuple[List[Dict[str, str]], str, Tuple[float, float, float, float, bool]]: 
-                (消息列表, 模型名称, (temperature, top_p, presence_penalty, frequency_penalty, stream))
+            Tuple containing:
+                - 消息列表
+                - 模型名称
+                - (temperature, top_p, presence_penalty, frequency_penalty, stream)
+                - tools (OpenAI格式工具定义列表，可能为None)
+                - tool_choice (工具选择策略，可能为None)
 
         Raises:
             ValueError: 参数验证失败时抛出
@@ -195,12 +199,19 @@ class ModelManager:
         frequency_penalty: float = body.get("frequency_penalty", 0.0)
         stream: bool = body.get("stream", False)
 
+        # 提取工具相关参数
+        tools = body.get("tools")  # OpenAI format tool definitions
+        tool_choice = body.get("tool_choice")  # Tool selection strategy
+
+        if tools:
+            logger.info(f"请求包含 {len(tools)} 个工具定义")
+
         # 模型特定验证
         if "sonnet" in model:  # Sonnet 模型温度必须在 0 到 1 之间
             if not isinstance(temperature, (float, int)) or temperature < 0.0 or temperature > 1.0:
                 raise ValueError("Sonnet 设定 temperature 必须在 0 到 1 之间")
 
-        return messages, model, (temperature, top_p, presence_penalty, frequency_penalty, stream)
+        return messages, model, (temperature, top_p, presence_penalty, frequency_penalty, stream), tools, tool_choice
 
     def get_model_list(self) -> List[Dict[str, Any]]:
         """获取可用模型列表
@@ -248,7 +259,7 @@ class ModelManager:
             ValueError: 参数验证或处理失败时抛出
         """
         # 验证和准备参数
-        messages, model, model_args = self.validate_and_prepare_params(body)
+        messages, model, model_args, tools, tool_choice = self.validate_and_prepare_params(body)
         temperature, top_p, presence_penalty, frequency_penalty, stream = model_args
 
         # 清理消息中的 XML tool 标签，防止目标模型输出 XML tool calls
@@ -273,6 +284,8 @@ class ModelManager:
                         model_arg=model_params,
                         deepseek_model=reasoner_config["model_id"],
                         claude_model=target_config["model_id"],
+                        tools=tools,
+                        tool_choice=tool_choice,
                     ),
                     media_type="text/event-stream",
                 )
@@ -282,6 +295,8 @@ class ModelManager:
                     model_arg=model_params,
                     deepseek_model=reasoner_config["model_id"],
                     claude_model=target_config["model_id"],
+                    tools=tools,
+                    tool_choice=tool_choice,
                 )
         else:
             # 使用 OpenAI 兼容组合模型
@@ -292,6 +307,8 @@ class ModelManager:
                         model_arg=model_params,
                         deepseek_model=reasoner_config["model_id"],
                         target_model=target_config["model_id"],
+                        tools=tools,
+                        tool_choice=tool_choice,
                     ),
                     media_type="text/event-stream",
                 )
@@ -301,6 +318,8 @@ class ModelManager:
                     model_arg=model_params,
                     deepseek_model=reasoner_config["model_id"],
                     target_model=target_config["model_id"],
+                    tools=tools,
+                    tool_choice=tool_choice,
                 )
 
 
