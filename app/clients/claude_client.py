@@ -71,10 +71,11 @@ class ClaudeClient(BaseClient):
                 "temperature": 1
                 if model_arg[0] < 0 or model_arg[0] > 1
                 else model_arg[0],
-                "top_p": model_arg[1],
                 "presence_penalty": model_arg[2],
                 "frequency_penalty": model_arg[3],
             }
+            if model_arg[1] is not None:
+                data["top_p"] = model_arg[1]
             
         elif self.provider == "oneapi":
             headers = {
@@ -93,10 +94,11 @@ class ClaudeClient(BaseClient):
                 "temperature": 1
                 if model_arg[0] < 0 or model_arg[0] > 1
                 else model_arg[0],
-                "top_p": model_arg[1],
                 "presence_penalty": model_arg[2],
                 "frequency_penalty": model_arg[3],
             }
+            if model_arg[1] is not None:
+                data["top_p"] = model_arg[1]
                 
         elif self.provider == "anthropic":
             headers = {
@@ -113,9 +115,10 @@ class ClaudeClient(BaseClient):
                 "stream": stream,
                 "temperature": 1
                 if model_arg[0] < 0 or model_arg[0] > 1
-                else model_arg[0],  # Claude仅支持temperature与top_p
-                "top_p": model_arg[1],
+                else model_arg[0],
             }
+            if model_arg[1] is not None:
+                data["top_p"] = model_arg[1]
             
             # Anthropic 原生 API 支持 system 参数
             if system_prompt:

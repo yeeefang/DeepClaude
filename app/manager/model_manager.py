@@ -189,7 +189,7 @@ class ModelManager:
 
         # 验证并提取参数
         temperature: float = body.get("temperature", 0.5)
-        top_p: float = body.get("top_p", 0.9)
+        top_p = body.get("top_p")  # None if not explicitly provided; DeepSeek API rejects both temperature and top_p
         presence_penalty: float = body.get("presence_penalty", 0.0)
         frequency_penalty: float = body.get("frequency_penalty", 0.0)
         stream: bool = body.get("stream", False)
