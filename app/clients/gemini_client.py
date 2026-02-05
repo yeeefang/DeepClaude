@@ -304,6 +304,8 @@ class GeminiClient(BaseClient):
 
             # 處理串流回應
             has_content = False
+            has_tool_calls = False
+
             for chunk in response_stream:
                 # 處理文本內容
                 if chunk.text:
@@ -316,6 +318,7 @@ class GeminiClient(BaseClient):
                         if hasattr(candidate, 'content') and candidate.content:
                             for part in candidate.content.parts:
                                 if hasattr(part, 'function_call') and part.function_call:
+                                    has_tool_calls = True
                                     func_call = part.function_call
                                     # 轉換為 OpenAI 格式的工具調用
                                     tool_call_json = {
@@ -332,8 +335,9 @@ class GeminiClient(BaseClient):
             # 檢查完成原因
             finish_reason = "stop"
 
-            if not has_content:
-                logger.warning("Gemini 未返回任何內容")
+            # 只有在既沒有文本也沒有工具調用時才警告
+            if not has_content and not has_tool_calls:
+                logger.warning("Gemini 未返回任何內容或工具調用")
                 yield ("assistant", "⚠️ 模型未返回任何內容，請重試")
 
             yield ("finish", finish_reason)
