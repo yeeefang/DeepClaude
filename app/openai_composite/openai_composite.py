@@ -144,12 +144,26 @@ class OpenAICompatibleComposite:
 
                 last_message = openai_messages[-1]
                 if last_message.get("role", "") != "user":
-                    raise ValueError("最後一則訊息的角色不是使用者，無法處理請求")
+                    logger.warning(f"最後一則訊息角色為 '{last_message.get('role', '')}' 而非 'user'，自動補充 user 訊息")
+                    continuation = {"role": "user", "content": "Please continue."}
+                    openai_messages.append(continuation)
+                    last_message = continuation
 
                 # Optimized bridge prompt
                 # Skip bridge if same model or no reasoning
                 if not self.is_same_model and reasoning and reasoning != "（無推理內容）":
                     original_content = last_message["content"]
+                    if isinstance(original_content, list):
+                        text_parts = []
+                        for block in original_content:
+                            if isinstance(block, dict):
+                                if block.get("type") == "text":
+                                    text_parts.append(block.get("text", ""))
+                                elif block.get("type") == "tool_result":
+                                    text_parts.append(f"[Tool result for {block.get('tool_use_id', '')}]: {block.get('content', '')}")
+                            elif isinstance(block, str):
+                                text_parts.append(block)
+                        original_content = "\n".join(text_parts) if text_parts else str(original_content)
                     last_message["content"] = _build_bridge_content(
                         original_content, reasoning, self.system_config
                     )
