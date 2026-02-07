@@ -81,7 +81,7 @@
         "api_key": "123456",
         "save_deepseek_tokens": false,
         "save_deepseek_tokens_max_tokens": 5,
-        "max_reasoning_tokens": 0
+        "max_reasoning_tokens": 2000
     },
     "composite_models": {
         "roo-exp": {
