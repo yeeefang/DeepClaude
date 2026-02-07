@@ -51,6 +51,7 @@ class OpenAICompatibleComposite:
         tools: Optional[List[Dict[str, Any]]] = None,
         tool_choice: Optional[Any] = None,
         stream_options: Optional[Dict[str, Any]] = None,
+        max_tokens: Optional[int] = None,
     ) -> AsyncGenerator[bytes, None]:
         """處理完整的流式輸出過程"""
         chat_id = f"chatcmpl-{hex(int(time.time() * 1000))[2:]}"
@@ -300,6 +301,7 @@ class OpenAICompatibleComposite:
         target_model: str = "",
         tools: Optional[List[Dict[str, Any]]] = None,
         tool_choice: Optional[Any] = None,
+        max_tokens: Optional[int] = None,
     ) -> Dict[str, Any]:
         """處理非流式輸出請求"""
         full_response = {

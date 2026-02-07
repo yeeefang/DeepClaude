@@ -234,15 +234,21 @@ class ModelManager:
         # 提取串流選項 (OpenAI spec: stream_options.include_usage for token counting in streaming)
         stream_options = body.get("stream_options")
 
+        # 提取 max_tokens (客戶端指定的最大輸出 token 數)
+        max_tokens = body.get("max_tokens")
+
         if tools:
             logger.info(f"請求包含 {len(tools)} 個工具定義")
+
+        if max_tokens:
+            logger.info(f"請求指定 max_tokens: {max_tokens}")
 
         # 模型特定驗證
         if "sonnet" in model.lower():  # Sonnet 模型溫度必須在 0 到 1 之間
             if not isinstance(temperature, (float, int)) or temperature < 0.0 or temperature > 1.0:
                 raise ValueError("Sonnet 設定 temperature 必須在 0 到 1 之間")
 
-        return messages, model, (temperature, top_p, presence_penalty, frequency_penalty, stream), tools, tool_choice, stream_options
+        return messages, model, (temperature, top_p, presence_penalty, frequency_penalty, stream), tools, tool_choice, stream_options, max_tokens
 
     def get_model_list(self) -> List[Dict[str, Any]]:
         """获取可用模型列表
@@ -290,7 +296,7 @@ class ModelManager:
             ValueError: 參數驗證或處理失敗時拋出
         """
         # 驗證和準備參數
-        messages, model, model_args, tools, tool_choice, stream_options = self.validate_and_prepare_params(body)
+        messages, model, model_args, tools, tool_choice, stream_options, max_tokens = self.validate_and_prepare_params(body)
         temperature, top_p, presence_penalty, frequency_penalty, stream = model_args
 
         # 清理訊息中的 XML tool 標籤，防止目標模型輸出 XML tool calls
@@ -318,6 +324,7 @@ class ModelManager:
                         tools=tools,
                         tool_choice=tool_choice,
                         stream_options=stream_options,
+                        max_tokens=max_tokens,
                     ),
                     media_type="text/event-stream",
                 )
@@ -329,6 +336,7 @@ class ModelManager:
                     claude_model=target_config["model_id"],
                     tools=tools,
                     tool_choice=tool_choice,
+                    max_tokens=max_tokens,
                 )
         else:
             # 使用 OpenAI 兼容組合模型
@@ -342,6 +350,7 @@ class ModelManager:
                         tools=tools,
                         tool_choice=tool_choice,
                         stream_options=stream_options,
+                        max_tokens=max_tokens,
                     ),
                     media_type="text/event-stream",
                 )
@@ -353,6 +362,7 @@ class ModelManager:
                     target_model=target_config["model_id"],
                     tools=tools,
                     tool_choice=tool_choice,
+                    max_tokens=max_tokens,
                 )
 
 

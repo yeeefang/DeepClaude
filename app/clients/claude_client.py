@@ -41,6 +41,7 @@ class ClaudeClient(BaseClient):
         system_prompt: str = None,
         tools: Optional[List[Dict[str, Any]]] = None,
         tool_choice: Optional[Any] = None,
+        max_tokens: Optional[int] = None,
     ) -> AsyncGenerator[tuple[str, Any], None]:
         """流式或非流式对话
 
@@ -52,6 +53,7 @@ class ClaudeClient(BaseClient):
             system_prompt: 系统提示
             tools: OpenAI格式的工具定义列表
             tool_choice: 工具选择策略
+            max_tokens: 最大輸出 token 數（None 則使用預設值 8192）
 
         Yields:
             tuple[str, Any]: (内容类型, 内容)
@@ -64,7 +66,7 @@ class ClaudeClient(BaseClient):
         elif self.provider == "oneapi":
             yield_gen = self._stream_oneapi(messages, model_arg, model, stream, system_prompt, tools, tool_choice)
         elif self.provider == "anthropic":
-            yield_gen = self._stream_anthropic(messages, model_arg, model, stream, system_prompt, tools, tool_choice)
+            yield_gen = self._stream_anthropic(messages, model_arg, model, stream, system_prompt, tools, tool_choice, max_tokens)
         else:
             raise ValueError(f"不支持的Claude Provider: {self.provider}")
 
@@ -131,7 +133,7 @@ class ClaudeClient(BaseClient):
         async for item in self._parse_openai_format(headers, data, stream):
             yield item
 
-    async def _stream_anthropic(self, messages, model_arg, model, stream, system_prompt, tools, tool_choice):
+    async def _stream_anthropic(self, messages, model_arg, model, stream, system_prompt, tools, tool_choice, max_tokens=None):
         headers = {
             "x-api-key": self.api_key,
             "anthropic-version": "2023-06-01",
@@ -149,10 +151,13 @@ class ClaudeClient(BaseClient):
         if system_prompt:
             full_system = f"{full_system}\n{system_prompt}".strip() if full_system else system_prompt
 
+        # Use client-specified max_tokens, or default to 16384 (enough for large file writes)
+        effective_max_tokens = max_tokens if max_tokens else 16384
+
         data = {
             "model": model,
             "messages": converted_messages,
-            "max_tokens": 8192,
+            "max_tokens": effective_max_tokens,
             "stream": stream,
             "temperature": 1 if model_arg[0] < 0 or model_arg[0] > 1 else model_arg[0],
         }

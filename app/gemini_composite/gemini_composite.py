@@ -50,6 +50,7 @@ class GeminiComposite:
         tools: Optional[List[Dict[str, Any]]] = None,
         tool_choice: Optional[Any] = None,
         stream_options: Optional[Dict[str, Any]] = None,
+        max_tokens: Optional[int] = None,
     ) -> AsyncGenerator[bytes, None]:
         """處理完整的流式輸出過程
 
@@ -298,6 +299,7 @@ class GeminiComposite:
         target_model: str = "gemini-2.5-flash-preview-04-17",
         tools: Optional[List[Dict[str, Any]]] = None,
         tool_choice: Optional[Any] = None,
+        max_tokens: Optional[int] = None,
     ) -> Dict[str, Any]:
         """非串流對話 - 透過串流實作後累積結果"""
         full_content = ""

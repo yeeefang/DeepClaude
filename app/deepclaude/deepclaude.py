@@ -84,6 +84,7 @@ class DeepClaude:
         tools: Optional[List[Dict[str, Any]]] = None,
         tool_choice: Optional[Any] = None,
         stream_options: Optional[Dict[str, Any]] = None,
+        max_tokens: Optional[int] = None,
     ) -> AsyncGenerator[bytes, None]:
         """處理完整的流式輸出過程
 
@@ -95,6 +96,7 @@ class DeepClaude:
             tools: OpenAI 格式的工具定義列表
             tool_choice: 工具選擇策略
             stream_options: 串流選項 (e.g. {"include_usage": true})
+            max_tokens: 最大輸出 token 數（傳遞給目標模型）
         """
         chat_id = f"chatcmpl-{hex(int(time.time() * 1000))[2:]}"
         created_time = int(time.time())
@@ -241,6 +243,7 @@ class DeepClaude:
                     system_prompt=system_content,
                     tools=tools,
                     tool_choice=tool_choice,
+                    max_tokens=max_tokens,
                 ):
                     if content_type == "answer":
                         filtered = xml_filter.process(content)
@@ -384,6 +387,7 @@ class DeepClaude:
         claude_model: str = "claude-3-5-sonnet-20241022",
         tools: Optional[List[Dict[str, Any]]] = None,
         tool_choice: Optional[Any] = None,
+        max_tokens: Optional[int] = None,
     ) -> dict:
         """處理非流式輸出過程"""
         chat_id = f"chatcmpl-{hex(int(time.time() * 1000))[2:]}"
@@ -457,6 +461,7 @@ class DeepClaude:
                 system_prompt=system_content,
                 tools=tools,
                 tool_choice=tool_choice,
+                max_tokens=max_tokens,
             ):
                 if content_type == "answer":
                     filtered = xml_filter.process(content)
