@@ -15,15 +15,14 @@ def _sanitize_messages_for_deepseek(messages: List[Dict[str, Any]]) -> List[Dict
     DeepSeek-reasoner requires:
     1. All assistant messages MUST have a `reasoning_content` field (can be None)
     2. Content must be a string, not structured blocks (list of dicts)
-    3. tool_calls should be in OpenAI format as a top-level field
-    4. tool role messages are supported natively
+    3. No tool_calls in assistant messages (strip them — DeepSeek-reasoner is
+       used only for reasoning, tool history is described as text context)
+    4. tool_result blocks → flattened into user text (no tool role messages needed
+       since we strip tool_calls from assistant messages)
 
     Roo Code sends structured content like:
         [{"type": "reasoning", "text": "..."}, {"type": "text", "text": "..."}, {"type": "tool_use", ...}]
     This must be converted to DeepSeek's expected flat format.
-
-    Per DeepSeek docs: when starting a new user question, previous reasoning_content
-    should be cleared (set to None) to save bandwidth.
     """
     sanitized = []
     for msg in messages:
@@ -33,57 +32,47 @@ def _sanitize_messages_for_deepseek(messages: List[Dict[str, Any]]) -> List[Dict
         if role == "assistant":
             new_msg["role"] = "assistant"
             raw_content = msg.get("content")
-            reasoning = msg.get("reasoning_content")
 
             if isinstance(raw_content, list):
-                # Structured content from Roo Code - extract parts
+                # Structured content from Roo Code - extract text parts only
                 text_parts = []
-                tool_calls = []
+                tool_actions = []
                 for block in raw_content:
                     if not isinstance(block, dict):
                         continue
                     btype = block.get("type", "")
-                    if btype == "reasoning":
-                        # Extract reasoning from content blocks
-                        if reasoning is None:
-                            reasoning = block.get("text", "")
-                    elif btype == "text":
+                    if btype == "text":
                         text = block.get("text", "")
                         if text:
                             text_parts.append(text)
                     elif btype == "tool_use":
-                        # Convert Roo's tool_use to OpenAI tool_calls format
-                        tool_calls.append({
-                            "id": block.get("id", ""),
-                            "type": "function",
-                            "function": {
-                                "name": block.get("name", ""),
-                                "arguments": json.dumps(block.get("input", {})),
-                            },
-                        })
+                        # Describe tool action as text context instead of tool_calls
+                        name = block.get("name", "")
+                        tool_input = block.get("input", {})
+                        tool_actions.append(f"[Used tool: {name}({json.dumps(tool_input, ensure_ascii=False)})]")
+                    # Skip "reasoning" blocks - not needed for context
 
-                new_msg["content"] = "\n".join(text_parts) if text_parts else ""
-                if tool_calls:
-                    new_msg["tool_calls"] = tool_calls
-                # Also preserve existing tool_calls from the original message
-                if not tool_calls and msg.get("tool_calls"):
-                    new_msg["tool_calls"] = msg["tool_calls"]
+                # Combine text and tool action descriptions
+                all_parts = text_parts + tool_actions
+                new_msg["content"] = "\n".join(all_parts) if all_parts else ""
+                # IMPORTANT: Do NOT include tool_calls - DeepSeek-reasoner doesn't need them
             else:
                 # Content is already a string or None
                 new_msg["content"] = raw_content if raw_content else ""
-                if msg.get("tool_calls"):
-                    new_msg["tool_calls"] = msg["tool_calls"]
+                # Strip any existing tool_calls from the message
 
             # CRITICAL: DeepSeek-reasoner requires reasoning_content on ALL assistant messages
             # Set to None for previous turns (saves bandwidth per docs)
             new_msg["reasoning_content"] = None
 
         elif role == "tool":
-            # Tool result messages - DeepSeek supports these natively
-            new_msg["role"] = "tool"
-            new_msg["content"] = msg.get("content", "")
-            if msg.get("tool_call_id"):
-                new_msg["tool_call_id"] = msg["tool_call_id"]
+            # Convert tool role messages to user messages with text context
+            # (since we strip tool_calls from assistant messages, tool messages
+            #  would be orphaned — convert to user text instead)
+            tool_call_id = msg.get("tool_call_id", "unknown")
+            content = msg.get("content", "")
+            new_msg["role"] = "user"
+            new_msg["content"] = f"[Tool result for {tool_call_id}]: {content}"
 
         elif role == "user":
             new_msg["role"] = "user"
@@ -125,8 +114,18 @@ def _sanitize_messages_for_deepseek(messages: List[Dict[str, Any]]) -> List[Dict
 
         sanitized.append(new_msg)
 
-    logger.debug(f"Sanitized {len(sanitized)} messages for DeepSeek (ensured reasoning_content on assistant msgs)")
-    return sanitized
+    # Post-process: merge consecutive same-role messages (required by DeepSeek API)
+    # This can happen when tool messages are converted to user messages
+    merged = []
+    for msg in sanitized:
+        if merged and merged[-1].get("role") == msg.get("role"):
+            # Merge with previous message of same role
+            merged[-1]["content"] = merged[-1].get("content", "") + "\n" + msg.get("content", "")
+        else:
+            merged.append(msg)
+
+    logger.debug(f"Sanitized {len(messages)} -> {len(merged)} messages for DeepSeek (stripped tool_calls, ensured reasoning_content)")
+    return merged
 
 
 class DeepSeekClient(BaseClient):
