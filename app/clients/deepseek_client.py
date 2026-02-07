@@ -2,11 +2,131 @@
 
 import os
 import json
-from typing import AsyncGenerator
+from typing import AsyncGenerator, List, Dict, Any
 
 from app.utils.logger import logger
 
 from .base_client import BaseClient
+
+
+def _sanitize_messages_for_deepseek(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Sanitize messages for DeepSeek-reasoner API compatibility.
+
+    DeepSeek-reasoner requires:
+    1. All assistant messages MUST have a `reasoning_content` field (can be None)
+    2. Content must be a string, not structured blocks (list of dicts)
+    3. tool_calls should be in OpenAI format as a top-level field
+    4. tool role messages are supported natively
+
+    Roo Code sends structured content like:
+        [{"type": "reasoning", "text": "..."}, {"type": "text", "text": "..."}, {"type": "tool_use", ...}]
+    This must be converted to DeepSeek's expected flat format.
+
+    Per DeepSeek docs: when starting a new user question, previous reasoning_content
+    should be cleared (set to None) to save bandwidth.
+    """
+    sanitized = []
+    for msg in messages:
+        role = msg.get("role", "")
+        new_msg = {}
+
+        if role == "assistant":
+            new_msg["role"] = "assistant"
+            raw_content = msg.get("content")
+            reasoning = msg.get("reasoning_content")
+
+            if isinstance(raw_content, list):
+                # Structured content from Roo Code - extract parts
+                text_parts = []
+                tool_calls = []
+                for block in raw_content:
+                    if not isinstance(block, dict):
+                        continue
+                    btype = block.get("type", "")
+                    if btype == "reasoning":
+                        # Extract reasoning from content blocks
+                        if reasoning is None:
+                            reasoning = block.get("text", "")
+                    elif btype == "text":
+                        text = block.get("text", "")
+                        if text:
+                            text_parts.append(text)
+                    elif btype == "tool_use":
+                        # Convert Roo's tool_use to OpenAI tool_calls format
+                        tool_calls.append({
+                            "id": block.get("id", ""),
+                            "type": "function",
+                            "function": {
+                                "name": block.get("name", ""),
+                                "arguments": json.dumps(block.get("input", {})),
+                            },
+                        })
+
+                new_msg["content"] = "\n".join(text_parts) if text_parts else ""
+                if tool_calls:
+                    new_msg["tool_calls"] = tool_calls
+                # Also preserve existing tool_calls from the original message
+                if not tool_calls and msg.get("tool_calls"):
+                    new_msg["tool_calls"] = msg["tool_calls"]
+            else:
+                # Content is already a string or None
+                new_msg["content"] = raw_content if raw_content else ""
+                if msg.get("tool_calls"):
+                    new_msg["tool_calls"] = msg["tool_calls"]
+
+            # CRITICAL: DeepSeek-reasoner requires reasoning_content on ALL assistant messages
+            # Set to None for previous turns (saves bandwidth per docs)
+            new_msg["reasoning_content"] = None
+
+        elif role == "tool":
+            # Tool result messages - DeepSeek supports these natively
+            new_msg["role"] = "tool"
+            new_msg["content"] = msg.get("content", "")
+            if msg.get("tool_call_id"):
+                new_msg["tool_call_id"] = msg["tool_call_id"]
+
+        elif role == "user":
+            new_msg["role"] = "user"
+            raw_content = msg.get("content")
+
+            if isinstance(raw_content, list):
+                # Structured content - flatten to string
+                text_parts = []
+                for block in raw_content:
+                    if isinstance(block, dict):
+                        btype = block.get("type", "")
+                        if btype == "text":
+                            text_parts.append(block.get("text", ""))
+                        elif btype == "tool_result":
+                            # Convert inline tool_result to text context
+                            result_content = block.get("content", "")
+                            tool_use_id = block.get("tool_use_id", "")
+                            text_parts.append(f"[Tool result for {tool_use_id}]: {result_content}")
+                    elif isinstance(block, str):
+                        text_parts.append(block)
+                new_msg["content"] = "\n".join(text_parts) if text_parts else ""
+            else:
+                new_msg["content"] = raw_content if raw_content else ""
+
+        elif role == "system":
+            new_msg["role"] = "system"
+            raw_content = msg.get("content")
+            if isinstance(raw_content, list):
+                text_parts = [
+                    b.get("text", "") for b in raw_content
+                    if isinstance(b, dict) and b.get("type") == "text"
+                ]
+                new_msg["content"] = "\n".join(text_parts)
+            else:
+                new_msg["content"] = raw_content if raw_content else ""
+        else:
+            # Unknown role - pass through
+            new_msg = dict(msg)
+
+        sanitized.append(new_msg)
+
+    logger.debug(f"Sanitized {len(sanitized)} messages for DeepSeek (ensured reasoning_content on assistant msgs)")
+    return sanitized
 
 
 class DeepSeekClient(BaseClient):
@@ -68,6 +188,10 @@ class DeepSeekClient(BaseClient):
                 内容类型: "reasoning" 或 "content"
                 内容: 实际的文本内容
         """
+        # Sanitize messages for DeepSeek-reasoner compatibility
+        # Ensures all assistant messages have reasoning_content field
+        sanitized_messages = _sanitize_messages_for_deepseek(messages)
+
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
@@ -75,7 +199,7 @@ class DeepSeekClient(BaseClient):
         }
         data = {
             "model": model,
-            "messages": messages,
+            "messages": sanitized_messages,
             "stream": True
         }
 
